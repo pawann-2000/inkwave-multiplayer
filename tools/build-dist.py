@@ -27,4 +27,31 @@ for d in ['src', 'styles', 'assets']: shutil.copytree(d, 'dist/' + d)
 # online play: P2P signaling (Trystero over Nostr) — loaded on demand when a player opens the online lobby
 for d in ['vendor/trystero', 'vendor/noble-secp256k1']: shutil.copytree(d, 'dist/' + d, ignore=shutil.ignore_patterns('*.map'))
 shutil.copy('index.html', 'dist/index.html')
-print('dist ready:', len(seen), 'addon files')
+
+# Response headers for the static host (Cloudflare Workers static assets read dist/_headers; the file is not served).
+# CSP: scripts only from this origin plus index.html's inline scripts (the import map, the fade-in) pinned by hash, so
+# injected markup can't run code. Styles need 'unsafe-inline' (style attributes inside the UI's SVG markup); the two
+# Workers (hidden-tab tick, music clock) start from blob: URLs; online play reaches Nostr relays over wss: (the list
+# lives in Trystero and NET.relays, so any wss: host); WebRTC data channels are outside CSP.
+import base64, hashlib
+html = open('dist/index.html', encoding='utf-8').read().replace('\r\n', '\n')
+inline = re.findall(r'<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>', html, re.S)
+hashes = ' '.join("'sha256-%s'" % base64.b64encode(hashlib.sha256(s.encode('utf-8')).digest()).decode() for s in inline)
+csp = '; '.join([
+    "default-src 'self'", f"script-src 'self' {hashes}", "style-src 'self' 'unsafe-inline'", "img-src 'self' data: blob:",
+    "font-src 'self'", "connect-src 'self' wss:", "worker-src 'self' blob:", "media-src 'self' blob:",
+    "object-src 'none'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'",
+])
+headers = [
+    ('Content-Security-Policy', csp),
+    ('X-Content-Type-Options', 'nosniff'),
+    ('Referrer-Policy', 'no-referrer'),
+    ('Cross-Origin-Opener-Policy', 'same-origin'),
+    ('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=()'),
+]
+with open('dist/_headers', 'w', encoding='utf-8') as f:
+    f.write('/*\n' + ''.join(f'  {k}: {v}\n' for k, v in headers))
+# never upload the Vercel link files kept above
+with open('dist/.assetsignore', 'w', encoding='utf-8') as f:
+    f.write('.vercel\nvercel.json\n')
+print('dist ready:', len(seen), 'addon files ·', len(inline), 'inline scripts pinned in the CSP')

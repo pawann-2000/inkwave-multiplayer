@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://inkwave-aah.pages.dev"><b>▶ Play now</b></a> ·
+  <a href="https://inkwave-multiplayer.pawann931.workers.dev"><b>▶ Play now</b></a> ·
   <a href="#controls">Controls</a> ·
   <a href="#online-play">Online play</a> ·
   <a href="#running-locally">Run locally</a> ·
@@ -94,6 +94,19 @@ npm test         # online-play protocol tests (node)
 npm run mptest   # 3 headless tabs play an online match and must agree (needs Chrome; see docs/NETWORK.md)
 npm run smoke    # boot + 8 s of autopilot in headless Chrome, fails on console errors
 npm run build    # assemble dist/ (game + only the three.js addons it imports)
+```
+
+## Deploying
+
+The game is hosted on Cloudflare Workers as static assets only (no server code): [`wrangler.jsonc`](wrangler.jsonc)
+serves `dist/`, and the build writes `dist/_headers` with a Content-Security-Policy that pins the page's inline scripts
+by hash, plus `nosniff`, `no-referrer`, COOP and a Permissions-Policy.
+
+```bash
+npx wrangler@4.141.0 login                         # once
+echo 'CLOUDFLARE_ACCOUNT_ID=<id>' > .env           # once: the target account (npx wrangler@4.141.0 whoami); .env is gitignored
+npm run deploy                                     # build + upload
+node tools/check-deploy.mjs <url>                  # headers, CSP, the game boots, an injected script is refused
 ```
 
 ## How it works

@@ -1,0 +1,13 @@
+// INKWAVE on Cloudflare Workers: static assets only — no Worker script runs; the asset layer serves dist/ (built by
+// tools/build-dist.py, which also writes dist/_headers: CSP + hardening headers). Deploy with `npm run deploy`.
+// The target account comes from CLOUDFLARE_ACCOUNT_ID in .env (gitignored), not from this file.
+{
+  "name": "inkwave-multiplayer",
+  "compatibility_date": "2026-09-27",
+  "assets": {
+    "directory": "./dist"
+  },
+  "workers_dev": true,
+  // one public URL: no per-version preview URLs
+  "preview_urls": false
+}

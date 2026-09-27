@@ -61,10 +61,10 @@ try {
   const code = await ev(host, () => __inkwave.session.view().codeText);
   check('host opened a room', /^[0-9A-Z]{5}-[0-9A-Z]{5}$/.test(code), code);
 
-  const guest = await openPage('guest', 'GuestKid', 'roller', `${BASE}/?join=${code}&${Q}`);
+  const guest = await openPage('guest', 'GuestKid', 'roller', `${BASE}/?${Q}#join=${code}`);
   await until(guest, () => window.__inkwave && __inkwave.session && __inkwave.session.status === 'lobby' && __inkwave.session.view().me && __inkwave.menus.current === 'lobby', NET === 'local' ? 60000 : 120000);
   await until(host, () => __inkwave.session.members.size === 2);
-  const third = await openPage('third', 'ThirdKid', 'charger', `${BASE}/?join=${code}&${Q}`);
+  const third = await openPage('third', 'ThirdKid', 'charger', `${BASE}/?${Q}#join=${code}`);
   await until(third, () => window.__inkwave && __inkwave.session && __inkwave.session.status === 'lobby' && __inkwave.session.view().me, NET === 'local' ? 60000 : 120000);
   await until(host, () => __inkwave.session.members.size === 3);
   const lobby = await ev(host, () => __inkwave.session.view().members.map((m) => ({ name: m.name, team: m.team, weapon: m.weapon, host: m.host })));

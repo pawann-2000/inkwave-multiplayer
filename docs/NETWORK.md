@@ -8,7 +8,8 @@ through [Trystero](https://github.com/dmotz/trystero).
 ## Playing
 
 1. **PLAY ONLINE → HOST A ROOM.** You get a 10-character room code (`ABCDE-12345`) and an invite link
-   (`…/?join=ABCDE-12345`).
+   (`…/#join=ABCDE-12345`). The code sits in the URL fragment, which browsers never send to the web server, its logs,
+   or a chat app's link-preview bot. That matters because the code is also the signaling encryption password.
 2. Friends open the link, or go to **PLAY ONLINE → JOIN** and type the code. They land in your lobby.
 3. In the lobby everyone picks a team (4 max per side) and a weapon. The host picks the stage, time of day, length,
    whether bots fill empty slots, and bot skill. The room's two ink colours are fixed when it opens, so everyone sees
@@ -101,6 +102,9 @@ someone else's squidkid, or act as the host.**
 | 8 | IP address exposure | Privacy | Inherent to WebRTC: every peer in a room learns every other peer's IP. Disclosed on the PLAY ONLINE screen. Players who need to hide their IP can use a VPN or a TURN relay (`NET.turn`). |
 | 9 | Supply chain (new dependencies) | Supply chain | Three packages vendored unmodified at pinned versions, with sha512 integrity recorded and verified (`vendor/trystero/README.md`). Loaded only when online is opened. No install scripts. |
 | 10 | Cheating: speed hacks, fake hits up to caps, aimbots | Business logic | **Not mitigated.** There's no authoritative server in a peer-to-peer design. Mitigation is social: play with people you know. Per-hit damage caps and rate limits bound the worst case. |
+| 11 | Script injection on the hosted page (a hostile name or packet that slipped past #1–#2) | Networking / Business logic | Content-Security-Policy from `dist/_headers` (written by `tools/build-dist.py`): scripts only from the origin plus the page's two inline scripts pinned by sha256, no `unsafe-eval`, `object-src`/`base-uri`/`form-action` none. Inline event handlers and injected scripts are refused. Tested: `tools/check-deploy.mjs` injects both. |
+| 12 | Room codes leaking through URLs (host logs, Referer, link previews) | Privacy | Invite links carry the code in the fragment (`#join=`), never sent to any server. `Referrer-Policy: no-referrer`. |
+| 13 | Framing / cross-window attacks on the hosted page | Networking | `frame-ancestors 'none'`, `Cross-Origin-Opener-Policy: same-origin`, `X-Content-Type-Options: nosniff`, a Permissions-Policy that denies camera / microphone / geolocation. HTTPS is always on (the `.dev` TLD is HSTS-preloaded). |
 
 Residual risks, accepted:
 - A peer already in the room can race the real host to a *new* joiner and get pinned as host. They must already know
@@ -117,6 +121,7 @@ npm start                     # dev server, then in another shell:
 npm run mptest                # 3 headless tabs over BroadcastChannel (60 ms simulated latency)
 node tools/mp-test.mjs --net trystero   # the production path: Nostr signaling + WebRTC (needs internet)
 node tools/mp-test.mjs --lag 150        # a slower link
+node tools/mp-test.mjs --net trystero --base https://inkwave-multiplayer.pawann931.workers.dev   # the hosted build
 ```
 
 `CHROME_PATH=/path/to/chrome` selects the browser (the tools default to Google Chrome's standard path). The E2E test
@@ -130,8 +135,10 @@ asserts cross-browser facts:
 - lobby round-trips and host-leave handling.
 
 Verified so far in Chromium only (Chrome for Testing 151, headless): the local transport at 60 ms and 150 ms
-simulated latency, and the real Trystero/Nostr + WebRTC path. Firefox and Safari are untested. The lobby has no
-gamepad path to the kick button (mouse only).
+simulated latency, and the real Trystero/Nostr + WebRTC path, also from the hosted build on Cloudflare Workers. In
+every run all three browsers were on one machine, so NAT traversal between different home networks is untested; players
+behind strict NATs may need a TURN server (`NET.turn`). Firefox and Safari are untested. The lobby has no gamepad path to
+the kick button (mouse only).
 
 For manual testing in one browser, open two tabs with `?net=local`: one hosts, the other joins with the code.
 

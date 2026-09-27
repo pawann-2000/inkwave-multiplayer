@@ -484,12 +484,14 @@ export class Session {
   }
 
   // ------------------------------------------------------------------------------------------ view
+  // The room code rides in the URL fragment (#join=…): browsers never send a fragment to the web server, its logs, or
+  // a link-preview bot, and the code doubles as the signaling encryption password (transport.js).
   inviteLink() {
     if (!this.code) return '';
     const u = new URL(location.href);
     u.search = ''; u.hash = '';
-    u.searchParams.set('join', formatCode(this.code));
     if (this.opts?.local) u.searchParams.set('net', 'local');
+    u.hash = 'join=' + formatCode(this.code);
     return u.toString();
   }
 

@@ -9,7 +9,7 @@
     "test": "node --test tools/tests/*.test.mjs",
     "mptest": "node tools/mp-test.mjs",
     "build": "python3 tools/build-dist.py",
-    "release": "./tools/release-pages.sh"
+    "deploy": "./tools/deploy.sh"
   },
   "keywords": [
     "game",
@@ -29,7 +29,7 @@
   "devDependencies": {
     "puppeteer-core": "^25.12.0"
   },
-  "homepage": "https://inkwave-aah.pages.dev",
+  "homepage": "https://inkwave-multiplayer.pawann931.workers.dev",
   "repository": {
     "type": "git",
     "url": "https://github.com/jaydendavisnc/inkwave.git"

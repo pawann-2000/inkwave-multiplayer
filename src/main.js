@@ -34,6 +34,8 @@ const NET_OPTS = params.get('net') === 'local'
   ? { local: true, lag: Math.min(1000, +params.get('lag') || 0), jitter: Math.min(1000, +params.get('jitter') || 0) }
   : {};
 const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
+// Invite link: …/#join=ABCDE-12345 (a fragment, so the room code never reaches a server — see session.inviteLink)
+const joinCodeFromHash = () => new URLSearchParams(location.hash.slice(1)).get('join');
 // The display's frame interval (s): the shortest of ~16 animation-frame gaps while little else runs. Delays only ever
 // lengthen a gap, so the minimum is the vsync period. Hidden tab / no frames → 60 Hz.
 function measureRefresh(n = 16) {
@@ -197,13 +199,19 @@ class Game {
     this.timer = new THREE.Timer(); this.timer.connect?.(document);
     this.fpsAcc = 0; this.fpsN = 0; this.fps = 60;
     G.mode = 'menu';
-    this.menus?.show(params.has('skipTitle') || params.has('join') ? 'main' : 'title');
+    const joinCode = joinCodeFromHash();
+    this.menus?.show(params.has('skipTitle') || joinCode ? 'main' : 'title');
     this._applyAudioVolumes();
     requestAnimationFrame(() => this._loop());
     this._initBackgroundTick();
     if (params.has('autostart')) this.api.startMatch({ mapId: map.id, difficulty: this.settings.difficulty, duration: +params.get('autostart') || this.settings.matchLength });
-    // invite link: ?join=ABCDE-12345 opens the online screen and joins the room
-    else if (params.has('join')) { this.menus?.show('online', { push: true, join: params.get('join') }); }
+    // invite link: opens the online screen and joins the room
+    else if (joinCode) { this.menus?.show('online', { push: true, join: joinCode }); }
+    // an invite pasted into this tab's address bar only changes the fragment (no reload): join from the menus
+    window.addEventListener('hashchange', () => {
+      const code = joinCodeFromHash();
+      if (code && G.mode === 'menu' && this.session.status === 'idle') this.menus?.show('online', { push: true, join: code });
+    });
     this.bootMs = Math.round(performance.now() - t0);
     window.__inkwave = this; // debug/audit hook
     window.__G = G;
