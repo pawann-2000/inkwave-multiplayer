@@ -221,8 +221,9 @@ export const NET = {
   extrapolate: 0.1,         // s: max dead reckoning past the newest snapshot before a remote actor holds still
   joinTimeout: 20,          // s: no host heard from after joining → "room not found"
   loadTimeout: 25,          // s: the host starts without peers still loading the stage (their squidkids go to bots)
-  // Optional TURN relays for players behind strict NATs (symmetric / carrier-grade): [{ urls, username, credential }].
-  // Empty = Trystero's default public STUN only; the host still relays game packets between peers that can't link.
+  // Static TURN relays for players behind strict NATs (symmetric / carrier-grade): [{ urls, username, credential }].
+  // Empty = on the hosted https site, short-lived Cloudflare TURN credentials from /api/turn (worker/turn.js) per room
+  // joined; elsewhere public STUN only. Either way the host relays game packets between members that can't link.
   turn: [],
   // Nostr relays used to find each other (signaling only). Empty = Trystero's built-in public list (a few of those are
   // usually down at any time — harmless, the rest carry it). Pin your own wss:// relays here for a private deploy.
@@ -244,6 +245,7 @@ export const PROGRESSION = {
 export const DEFAULT_SETTINGS = {
   sensitivity: 1.0,         // mouse multiplier 0.2..3
   padSensitivity: 1.0,
+  touchSensitivity: 1.0,     // touch-screen look drag multiplier 0.3..3
   invertY: false,
   fov: 82,                  // horizontal FOV at 16:9, 65..100
   // graphics (src/core/gfx.js): a preset, or 'custom' = the gfx* knobs below (they start as High)

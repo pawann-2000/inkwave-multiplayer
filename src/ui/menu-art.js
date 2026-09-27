@@ -472,6 +472,7 @@ export class InkWipe {
 // ================================================================================== settings previews
 // Every preview returns { el, set(value, settings), tick(dt) } and lives inside .iw-prev__stage (16:9 box).
 const MOUSE_RAD_PER_PX = 0.0021;   // src/game/player.js look scale
+const TOUCH_RAD_PER_PX = 0.0068;   // src/game/player.js touch look scale (per CSS px of thumb drag)
 const PAD_YAW_RATE = 3.4;          // rad/s at full stick × padSensitivity
 
 function frameSVG(inner, cls = '') {
@@ -491,7 +492,7 @@ const skyline = (w, seed) => {
   return out;
 };
 
-function previewLook(ctx, pad) {
+function previewLook(ctx, dev) {
   const W = 960;
   const pano = `<svg class="iw-pv-pano" viewBox="0 0 ${W} 180" preserveAspectRatio="none" aria-hidden="true">
     <rect width="${W}" height="100" fill="#8fd3f5"/>${skyline(W, 17)}
@@ -501,14 +502,15 @@ function previewLook(ctx, pad) {
     ${Array.from({ length: 6 }, (_, i) => { const x = 40 + i * 160; return `<rect x="${x}" y="84" width="46" height="34" rx="6" fill="#fff7e8" stroke="#d9cbb0" stroke-width="3"/>`; }).join('')}
   </svg>`;
   const screen = h('div', { class: 'iw-pv-screen', html: pano + `<i class="iw-pv-xhair"></i>` });
-  const inputEl = h('div', { class: 'iw-pv-input', html: pad ? padGlyph('RS') : mouseGlyph('M') });
+  const inputEl = h('div', { class: 'iw-pv-input', html: dev === 'pad' ? padGlyph('RS') : dev === 'touch' ? `<span class="iw-pv-finger">${GLYPHS.touch}</span>` : mouseGlyph('M') });
   const stat = h('div', { class: 'iw-pv-stat' });
   const el = h('div', { class: 'iw-pv iw-pv--look' }, screen, h('div', { class: 'iw-pv-row' }, inputEl, stat));
   const panoEl = screen.firstElementChild;
   let v = +ctx.value || 1, ph = 0, shown = v;
   const set = (nv) => {
     v = +nv || 1;
-    if (pad) stat.innerHTML = `Full-stick 360° turn in <b>${(TAU / (PAD_YAW_RATE * v)).toFixed(2)} s</b>`;
+    if (dev === 'pad') stat.innerHTML = `Full-stick 360° turn in <b>${(TAU / (PAD_YAW_RATE * v)).toFixed(2)} s</b>`;
+    else if (dev === 'touch') stat.innerHTML = `Half-turn for a <b>${fmtInt(Math.PI / (TOUCH_RAD_PER_PX * v))} px</b> thumb drag`;
     else stat.innerHTML = `<b>${fmtInt(TAU / (MOUSE_RAD_PER_PX * v))} px</b> of mouse travel per 360° turn`;
   };
   set(v);
@@ -896,8 +898,9 @@ function previewReset() {
 /** ctx: { value, settings, gfxStatus(), palettes, cbPalette, diffs, diffInfo, durations, tab } */
 export function createPreview(key, ctx = {}) {
   switch (key) {
-    case 'sensitivity': return previewLook(ctx, false);
-    case 'padSensitivity': return previewLook(ctx, true);
+    case 'sensitivity': return previewLook(ctx, 'mouse');
+    case 'padSensitivity': return previewLook(ctx, 'pad');
+    case 'touchSensitivity': return previewLook(ctx, 'touch');
     case 'invertY': return previewInvert(ctx);
     case 'quality': return previewQuality(ctx);
     case 'fov': return previewFov(ctx);

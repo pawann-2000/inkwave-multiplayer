@@ -1,7 +1,8 @@
 // Check a hosted INKWAVE (after `npm run deploy`, or against `npx wrangler dev`): security headers on the real
-// responses, module MIME types, host-only files not served, the game boots and plays with no CSP violation, an injected
-// inline event handler is blocked, and invite links carry the room code only in the fragment.
-// usage: CHROME_PATH=/path/to/chrome node tools/check-deploy.mjs <url> [--play 8]
+// responses, the bundle (entry, MIME type, immutable caching), host-only files and raw sources not served, the game
+// boots and plays with no CSP violation, an injected inline event handler is blocked, and invite links carry the room
+// code only in the fragment.
+// usage: CHROME_PATH=/path/to/chrome node tools/check-deploy.mjs <url> [--play 8] [--no-turn]   (--no-turn: relay not set up)
 import puppeteer from 'puppeteer-core';
 
 const args = process.argv.slice(2);
@@ -25,13 +26,34 @@ check('Referrer-Policy: no-referrer', hd('referrer-policy') === 'no-referrer');
 check('Cross-Origin-Opener-Policy: same-origin', hd('cross-origin-opener-policy') === 'same-origin');
 check('Permissions-Policy denies camera / microphone / geolocation', /camera=\(\)/.test(hd('permissions-policy')) && /microphone=\(\)/.test(hd('permissions-policy')) && /geolocation=\(\)/.test(hd('permissions-policy')));
 check('HTTPS (secure context: online play needs it)', base.startsWith('https://') || /^http:\/\/(localhost|127\.0\.0\.1)/.test(base), base);
-for (const [p, re] of [['/src/main.js', /javascript/], ['/vendor/trystero/core/index.mjs', /javascript/], ['/assets/fonts/Rubik-latin.woff2', /font\/woff2/]]) {
+// the release bundle: the entry named in index.html (content-hashed, cached for good) + fonts
+const html = await (await fetch(base + '/')).text();
+const entry = (/<script type="module" src="\.?(\/js\/[^"]+\.js)"/.exec(html) || [])[1];
+check('index.html loads the bundled entry (no import map)', !!entry && !html.includes('importmap'), entry || 'no /js/ entry script');
+if (entry) {
+  const r = await fetch(base + entry);
+  check('bundle chunks are cached immutably', /immutable/.test(r.headers.get('cache-control') || ''), r.headers.get('cache-control') || '');
+}
+for (const [p, re] of [[entry || '/js/missing.js', /javascript/], ['/assets/fonts/Rubik-latin.woff2', /font\/woff2/], ['/manifest.webmanifest', /manifest\+json|json/], ['/assets/icons/icon-192.png', /image\/png/]]) {
   const r = await fetch(base + p);
   check(`${p} served as ${re.source}`, r.ok && re.test(r.headers.get('content-type') || ''), `${r.status} ${r.headers.get('content-type')}`);
 }
-for (const p of ['/_headers', '/.assetsignore', '/wrangler.jsonc', '/.env', '/tools/deploy.sh']) {
+for (const p of ['/_headers', '/.assetsignore', '/wrangler.jsonc', '/.env', '/tools/deploy.sh', '/src/main.js', '/worker/turn.js']) {
   const r = await fetch(base + p);
   check(`${p} not served`, r.status === 404, String(r.status));
+}
+// TURN relay credentials (worker/turn.js): same-origin POST only, never cached; "configured" = a TURN entry comes back
+{
+  const origin = new URL(base).origin;
+  const get = await fetch(base + '/api/turn');
+  check('/api/turn refuses GET (405)', get.status === 405, String(get.status));
+  const foreign = await fetch(base + '/api/turn', { method: 'POST', headers: { Origin: 'https://evil.example' } });
+  check('/api/turn refuses another origin (403)', foreign.status === 403, String(foreign.status));
+  const own = await fetch(base + '/api/turn', { method: 'POST', headers: { Origin: origin } });
+  const body = await own.json().catch(() => ({}));
+  const turnOk = own.status === 200 && Array.isArray(body.iceServers) && body.iceServers.some((e) => e.username && e.credential && e.urls.some((u) => /^turns?:/.test(u)));
+  check('/api/turn responses are no-store + nosniff', own.headers.get('cache-control') === 'no-store' && own.headers.get('x-content-type-options') === 'nosniff');
+  check('/api/turn mints TURN credentials (relay configured)', turnOk || args.includes('--no-turn'), `${own.status}${own.status === 503 ? ' — set the TURN_KEY_ID / TURN_KEY_API_TOKEN secrets (or pass --no-turn)' : ''}`);
 }
 
 // ---- in a browser
@@ -57,7 +79,7 @@ const page = await browser.newPage();
 const errs = await watch(page);
 await page.goto(`${base}/?autostart=60&autopilot`);
 try {
-  await page.waitForFunction(() => window.__inkwave && __inkwave.match && __inkwave.match.state === 'playing', { timeout: 240000, polling: 250 });
+  await page.waitForFunction(() => window.__inkwave && __inkwave.match && !__inkwave.match.attract && __inkwave.match.state === 'playing', { timeout: 240000, polling: 250 });
   await new Promise((r) => setTimeout(r, playSecs * 1000));
   const st = await page.evaluate(() => ({ state: __inkwave.match.state, csp: window.__csp.slice(), lost: __inkwave.R.renderer.getContext().isContextLost() }));
   check('the game boots and plays a match', st.state === 'playing' && !st.lost, st.state);

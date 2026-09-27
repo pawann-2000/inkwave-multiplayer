@@ -23,7 +23,7 @@
 import { h, clamp, colorVars, toHex, fmtTime, fmtInt, splatSVG, splatShape, pct, shade, lerp, easeOutBack, easeOutCubic, restartAnim, prefersReducedMotion } from './ui-util.js';
 import { SQUID, SPLAT_ICON, DEATH_ICON, GLYPHS, SUB_ICONS, richText, keycap, specialIcon, weaponIcon } from './ui-icons.js';
 import { WEAPONS, SPECIALS, TEAM_NAMES, SUB, PLAYER, MATCH } from '../config.js';
-import { on, G } from '../core/ctx.js';
+import { on, G, view } from '../core/ctx.js';
 
 let HUD_ID = 0;
 const BUMP = { duration: 320, easing: 'cubic-bezier(.34,1.8,.64,1)' };
@@ -33,6 +33,7 @@ const TWIN_KICK_T = { duration: 130, easing: 'cubic-bezier(.2,.8,.3,1)' };
 const TAU = Math.PI * 2;
 const STREAKS = { 2: 'DOUBLE SPLAT!', 3: 'TRIPLE SPLAT!', 4: 'QUAD SPLAT!' };
 const kindOf = (w) => (WEAPONS[w] && WEAPONS[w].kind) || w || 'shooter';
+const MAP_HINT = { kbm: 'Hold [TAB] to plan a Super Jump', pad: 'Hold {View} to plan a Super Jump', touch: 'Tap MAP to plan a Super Jump' };
 
 // ------------------------------------------------------------------ HUD-only art
 const K = '#15121c';
@@ -72,7 +73,7 @@ export class HUD {
     this._fxLoop = this._fxLoop.bind(this);
     this._lastFx = 0;
     this._rafId = 0;
-    this._onResize = () => this._resizeCanvas();
+    this._onResize = () => { this._resizeCanvas(); this._tankCss = null; };
     addEventListener('resize', this._onResize);
     this._bindBus();
   }
@@ -358,7 +359,7 @@ export class HUD {
           by ? h('div', { class: 'iw-spl__name iw-display' }, String(by)) : null,
           killer && killer.weaponId ? h('div', { class: 'iw-spl__wn' }, (WEAPONS[killer.weaponId] || {}).name || '') : null),
         ring),
-      h('div', { class: 'iw-spl__hint', html: richText('Hold [TAB] to plan a Super Jump') }));
+      h('div', { class: 'iw-spl__hint', html: richText(MAP_HINT[G.input?.lastDevice] || MAP_HINT.kbm) }));
     colorVars(el, 'by', toHex(byColor, '#2f5bff'));
     this.splatLayer.appendChild(el);
     const st = { el, tint, end: this._fxTime + Math.max(0, respawn), num, last: Math.ceil(respawn) };
@@ -687,7 +688,7 @@ export class HUD {
   _updDowns(dt) {
     if (!this._downs.length) return;
     const cam = G.camera;
-    const W = innerWidth, H = innerHeight;
+    const W = view.w, H = view.h;
     for (let i = this._downs.length - 1; i >= 0; i--) {
       const d = this._downs[i];
       d.t += dt;
@@ -924,7 +925,9 @@ export class HUD {
   _drawTank(dt, sub, low, nosub) {
     const T = this._tank, c = this.tankCtx, cv = this.tankCanvas;
     const dpr = Math.min(2, devicePixelRatio || 1);
-    const cw = cv.clientWidth || 18, chh = cv.clientHeight || 74;
+    // CSS size measured once per resize (reading it every frame forced a style + layout pass per frame)
+    if (!this._tankCss && cv.clientWidth) this._tankCss = [cv.clientWidth, cv.clientHeight];
+    const [cw, chh] = this._tankCss || [18, 74];
     const W = Math.round(cw * dpr), H = Math.round(chh * dpr);
     if (cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; }
     const L = this._L;
@@ -1084,14 +1087,18 @@ export class HUD {
     const a = k * (target - this._mapT) - c * this._mapV;
     this._mapV += a * Math.min(dt, 0.05); this._mapT += this._mapV * Math.min(dt, 0.05);
     if (Math.abs(target - this._mapT) < 0.001 && Math.abs(this._mapV) < 0.001) { this._mapT = target; this._mapV = 0; }
-    const W = innerWidth, H = innerHeight;
+    const W = view.w, H = view.h;
     const u = Math.min(W / 100, (H * 1.7778) / 100);
     const asp = (m.canvas.width || 1) / (m.canvas.height || 1);
     const fit = (sz) => (asp >= 1 ? [sz, sz / asp] : [sz * asp, sz]);
     const [w0, h0] = fit(14.5 * u), [w1, h1] = fit(Math.min(H * 0.78, W * 0.6));
     const t = this._mapT;
     const bw = lerp(w0, w1, t), bh = lerp(h0, h1, t);
-    const x = lerp(2.2 * u, (W - w1) / 2, t), y = lerp(H - 2.2 * u - h0, (H - h1) / 2 + u * 1.2, t);
+    // corner: bottom-left, or on a touch screen top-left under the PAUSE / MAP buttons (clear of the move stick's
+    // thumb; styles/touch.css .iw-tb--pause: 10px from the top, clamp(40px, 10vmin, 60px) tall)
+    const touch = G.input?.lastDevice === 'touch';
+    const y0 = touch ? 10 + clamp(Math.min(W, H) * 0.1, 40, 60) + 12 : H - 2.2 * u - h0;
+    const x = lerp(touch ? 10 : 2.2 * u, (W - w1) / 2, t), y = lerp(y0, (H - h1) / 2 + u * 1.2, t);
     const inside = (W - w1) / 2 < 22 * u;
     if (inside !== L.lgIn) { L.lgIn = inside; this.mapLegend.classList.toggle('is-inside', inside); }
     const box = `${x.toFixed(1)},${y.toFixed(1)},${bw.toFixed(1)},${bh.toFixed(1)}`;

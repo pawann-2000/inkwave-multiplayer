@@ -155,6 +155,7 @@ export class Minimap {
   }
 
   _drawBase() {
+    this._dirty = true;
     const W = this.w, H = this.h, N = W * H, hgt = this.hgt, top = this.topBlock, nrm = this.nrm, lvl = this.level, s = this.s;
     const img = this.bctx.createImageData(W, H), d = img.data;
     const theme = G.game?.theme || G.game?.mapDef?.theme || 'day';
@@ -302,6 +303,7 @@ export class Minimap {
     }
     this.ictx.putImageData(this.inkImg, 0, 0, 0, y0, W, y1 - y0);
     this.fctx.putImageData(this.flashImg, 0, 0, 0, y0, W, y1 - y0);
+    this._dirty = true;
     if (flashes && !this._quiet) this.flashT = 0;
   }
 
@@ -328,7 +330,12 @@ export class Minimap {
       else { this._drawInk(0, Math.floor(this.h / BANDS)); this._band = 1; }
     }
     this.flashT += dt;
-    this._compose(dt);
+    // recompose only when the picture changes: new ink, the claim flash fading, live marks (effects, bombs, tempests),
+    // plus one pass after the last of them ends
+    const P = G.projectiles;
+    const busy = fxList.length > 0 || this.flashT < 0.5 || !!(P && (P.bombs?.length || P.clouds?.length));
+    if (busy || this._dirty || this._wasBusy) { this._dirty = false; this._compose(dt); }
+    this._wasBusy = busy;
   }
 
   _compose(dt) {

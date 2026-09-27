@@ -1398,8 +1398,6 @@ export async function createTextureLibrary(renderer, { size = 512 } = {}) {
       renderer.getContext().flush();   // one GPU batch per layer: a single long batch can trip weak iGPUs' watchdogs
     }
     for (const t of out.textures) t.generateMipmaps = true;
-    // wait for the GPU so the reported time is honest (one-pixel readback)
-    renderer.readRenderTargetPixels(out, 0, 0, 1, 1, new Uint8Array(4), undefined, 2);
 
     renderer.setRenderTarget(prevRT);
     renderer.autoClear = prevAutoClear;
@@ -1424,7 +1422,7 @@ export async function createTextureLibrary(renderer, { size = 512 } = {}) {
     meta,
     names: MATERIALS.map((m) => m.name),
     size,
-    stats: { ms: +(t1 - t0).toFixed(1), compileMs: +(tCompiled - t0).toFixed(1), size },
+    stats: { ms: +(t1 - t0).toFixed(1), compileMs: +(tCompiled - t0).toFixed(1), size },   // CPU time (the GPU bake runs on)
     rebake: () => bake(),
     dispose() { out.dispose(); },
   };

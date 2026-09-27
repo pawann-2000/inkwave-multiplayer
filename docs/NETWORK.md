@@ -77,7 +77,7 @@ such as the end-of-match judge animation, finishes when the tab comes back to th
 
 | Key | Default | Meaning |
 |---|---|---|
-| `turn` | `[]` | TURN servers for players behind strict NATs (`[{ urls, username, credential }]`). Without them, a pair that can't connect directly is relayed through the host, but a player who can't reach the host can't join. |
+| `turn` | `[]` | Static TURN servers (`[{ urls, username, credential }]`). Empty = on the hosted https site, each room join fetches short-lived Cloudflare TURN credentials from `/api/turn` (see **TURN relay** below); elsewhere, direct connections only. Without a relay, a pair that can't connect directly is relayed through the host, but a player who can't reach the host can't join. |
 | `relays` | `[]` | Pin your own `wss://` Nostr relays. Empty uses Trystero's public list; a few of those are usually down at any time, which only shows as console noise. |
 | `tickHz`, `interpDelay`, `extrapolate` | 30, 0.1 s, 0.1 s | Snapshot rate, interpolation delay, and dead-reckoning cap. |
 | `limits` | see file | Per-peer flood limits (token buckets). |
@@ -99,12 +99,37 @@ someone else's squidkid, or act as the host.**
 | 5 | Floods / map-wide paint griefing (CPU/GPU denial of service) | Business logic / Networking | ≤ 512 events and ≤ 8 states per packet; splat radius ≤ 4.5 m (refused, not clamped); position inside the arena; per-peer token buckets for packets, control messages, splats, and hits (`NET.limits`). E2E "floods refused"; mutation-tested. |
 | 6 | Strangers joining a room | AuthN | 50-bit room codes from `crypto.getRandomValues`. Room cap of 8. The host can kick, which also bans for the session. |
 | 7 | Signaling relays reading session data | Crypto / Privacy | Trystero encrypts SDP with AES-GCM under a key derived from the room code (`password`). Relays see a hashed topic and ciphertext. Game data flows over WebRTC (DTLS), never through relays. |
-| 8 | IP address exposure | Privacy | Inherent to WebRTC: every peer in a room learns every other peer's IP. Disclosed on the PLAY ONLINE screen. Players who need to hide their IP can use a VPN or a TURN relay (`NET.turn`). |
+| 8 | IP address exposure | Privacy | Inherent to WebRTC: every peer in a room learns every other peer's IP. Disclosed on the PLAY ONLINE screen. The TURN relay does not hide it (direct candidates are still offered); players who need to hide their IP can use a VPN. |
+| 14 | Relay credential farming: scripts calling `/api/turn` to relay their own traffic on the site's bill | Business logic | Same-origin POST only, 10 requests / min / IP (Workers rate limit), credentials expire after 3 h. **Residual:** without accounts a determined script can't be fully stopped — watch TURN usage (Realtime → TURN analytics) and set a billing notification. |
+| 15 | TURN API token leak | Secrets | Worker secret only (`wrangler secret put`), never in the repo or `dist/`; never logged or returned (upstream failures become a generic 502 — tested). `/worker/*` is not served. |
 | 9 | Supply chain (new dependencies) | Supply chain | Three packages vendored unmodified at pinned versions, with sha512 integrity recorded and verified (`vendor/trystero/README.md`). Loaded only when online is opened. No install scripts. |
 | 10 | Cheating: speed hacks, fake hits up to caps, aimbots | Business logic | **Not mitigated.** There's no authoritative server in a peer-to-peer design. Mitigation is social: play with people you know. Per-hit damage caps and rate limits bound the worst case. |
 | 11 | Script injection on the hosted page (a hostile name or packet that slipped past #1–#2) | Networking / Business logic | Content-Security-Policy from `dist/_headers` (written by `tools/build-dist.py`): scripts only from the origin plus the page's two inline scripts pinned by sha256, no `unsafe-eval`, `object-src`/`base-uri`/`form-action` none. Inline event handlers and injected scripts are refused. Tested: `tools/check-deploy.mjs` injects both. |
 | 12 | Room codes leaking through URLs (host logs, Referer, link previews) | Privacy | Invite links carry the code in the fragment (`#join=`), never sent to any server. `Referrer-Policy: no-referrer`. |
 | 13 | Framing / cross-window attacks on the hosted page | Networking | `frame-ancestors 'none'`, `Cross-Origin-Opener-Policy: same-origin`, `X-Content-Type-Options: nosniff`, a Permissions-Policy that denies camera / microphone / geolocation. HTTPS is always on (the `.dev` TLD is HSTS-preloaded). |
+
+### TURN relay
+
+Some networks block direct WebRTC links: mobile carriers (carrier-grade NAT), campus and office Wi-Fi, some home
+routers. Public STUN alone can't get through them, so the hosted site adds a relay. The static site gets one tiny Worker
+route (`worker/turn.js`, `assets.run_worker_first: ["/api/*"]`):
+
+- `POST /api/turn` → `{ iceServers, ttl }`: credentials minted per call from a Cloudflare Realtime TURN key (secrets
+  `TURN_KEY_ID`, `TURN_KEY_API_TOKEN`), valid for 3 h. TURN allocations refresh with them, so that covers a lobby
+  plus several matches.
+- The client (`src/net/transport.js`) fetches them before each room join and validates them: only `turn:` / `turns:` /
+  `stun:` URLs, bounded strings and counts. Any failure falls back to direct connections, as before.
+- Relayed traffic stays DTLS-encrypted end to end. Cloudflare sees addresses and volumes, not game data.
+- Costs: Cloudflare TURN is free up to 1,000 GB of egress a month, then $0.05/GB.
+- Tests: `tools/tests/turn-worker.test.mjs` covers method, origin, configuration, rate limit, upstream failures without
+  leaks, key-id path injection and hostile upstream answers. `tools/check-deploy.mjs` checks the live endpoint.
+
+Setup, once per deployment:
+
+1. Cloudflare dashboard → Realtime → TURN Server → Create. Copy the Key ID and the API token.
+2. `npx wrangler@4.141.0 secret put TURN_KEY_ID`, then `npx wrangler@4.141.0 secret put TURN_KEY_API_TOKEN`.
+
+For `wrangler dev`, the same names go in `.dev.vars` (gitignored).
 
 Residual risks, accepted:
 - A peer already in the room can race the real host to a *new* joiner and get pinned as host. They must already know
@@ -136,8 +161,8 @@ asserts cross-browser facts:
 
 Verified so far in Chromium only (Chrome for Testing 151, headless): the local transport at 60 ms and 150 ms
 simulated latency, and the real Trystero/Nostr + WebRTC path, also from the hosted build on Cloudflare Workers. In
-every run all three browsers were on one machine, so NAT traversal between different home networks is untested; players
-behind strict NATs may need a TURN server (`NET.turn`). Firefox and Safari are untested. The lobby has no gamepad path to
+every run all three browsers were on one machine, so NAT traversal between different networks is untested. Players
+behind strict NATs rely on the TURN relay (above). Firefox and Safari are untested. The lobby has no gamepad path to
 the kick button (mouse only).
 
 For manual testing in one browser, open two tabs with `?net=local`: one hosts, the other joins with the code.

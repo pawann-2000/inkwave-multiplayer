@@ -106,7 +106,9 @@ export class Session {
     if (!t) return false;
     this.selfId = t.selfId;
     this._joinTimer = setTimeout(() => {
-      if (!this.hostId) this._fail("Couldn't find that room. Check the code, or ask the host to share the link again.");
+      // the room answered but the connection to the host failed (onError) → say so; silence → wrong or closed room
+      if (!this.hostId) this._fail(this.connWarn ? "Found the room, but your network blocked the connection to the host. Try another network: Wi-Fi instead of mobile data, or the other way round."
+        : "Couldn't find that room. Check the code, or ask the host to share the link again.");
     }, NET.joinTimeout * 1000);
     for (const id of t.peers()) this._hello(id);   // whoever is already here (only the host answers)
     this._tickTimer = setInterval(() => this._tick(), 1000);
@@ -128,7 +130,10 @@ export class Session {
     t.onLeave = (id) => this._peerLeave(id);
     t.onError = (text) => {
       console.warn('[net] connection', text);
-      this.connWarn = "Couldn't open a direct connection to a player (strict network). The host will relay if it can.";
+      // a member who can't reach the host can't play at all; anyone else is still relayed through the host
+      this.connWarn = this.isHost ? "A player's network blocked the connection to you. If they don't show up, ask them to switch networks (Wi-Fi instead of mobile data, or the other way round)."
+        : !this.hostId ? "Your network blocked the connection to the host. Try another network: Wi-Fi instead of mobile data, or the other way round."
+        : "Couldn't connect directly to one player (strict network). The host relays their moves to you.";
       this._changed();
     };
     return t;

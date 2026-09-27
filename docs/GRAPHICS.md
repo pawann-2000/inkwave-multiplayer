@@ -27,7 +27,7 @@ holds 60 fps. Players can also choose a fixed preset (Low / Medium / High / Ultr
 | Bloom glow | on / off | Mip-chain blur of the bright parts |
 | Water reflections | Off · Low · Med · High | Planar reflection on Halyard at 28 / 40 / 50 % size. High also reflects squid kids and effects |
 | Effects | Low · Med · High | Particle counts (40 / 70 / 100 %), screen-effect blur taps, and how far away ink splats animate (18 / 28 / 40 m) |
-| World detail | Low · Med · High | Ink atlas 2K/2K/4K, surface textures 256/256/512 px, prop geometry 60/80/100 %, and at Low a lighter surface shader. **Applies from the next match** |
+| World detail | Low · Med · High | Ink atlas 2K/2K/4K, surface textures 256/256/512 px, prop geometry 60/80/100 %, cloud bake 1024/1536/2048 px wide, minimap 3.5/5/7 px per metre, and at Low a lighter surface shader. **Applies from the next match** |
 
 | Preset | Res | HiDPI | Shadows | AA | AO | Bloom | Reflections | Effects | Detail |
 |---|---|---|---|---|---|---|---|---|---|
@@ -96,6 +96,69 @@ single most expensive object on screen at Low. Its cost depends heavily on how m
 | Low preset overall (same resolution) | GPU **~30–32 → ~24–26 ms** per frame; in-match **25–30 → 30–36 fps** |
 | New Lowest level (800×450) | GPU 12.1 ms per frame, CPU 7.5 ms: 60 fps most of the time on this machine |
 | Renderer: old post passes are disposed on every rebuild (they leaked); the AO buffer keeps its full size after a window resize (it dropped to CSS-pixel size) | After 12 settings switches, live GPU textures went **50 → 202** before, **50 → 50** now |
+
+## Boot, download and phones
+
+Same laptop and method as above. "4× CPU" is Chrome's CPU throttling in a landscape-phone emulation (844×390, DPR 3,
+touch): roughly a mid-range phone's JavaScript speed. The GPU stays the UHD 630's, so phone GPU cost is not emulated.
+Before/after rows come from runs alternated with the committed baseline, three rounds each.
+
+**Boot** (first visit, empty shader cache, Auto → Low): **17.5 → 9.3 s**. With a warm cache it is 4.2–4.5 s. At 4× CPU
+the baseline booted in 25.2–25.8 s and the current code in 16.6–17.1 s.
+
+- three.js keys a shader program on the render target it draws into (tone mapping and output colour space differ between
+  the canvas and an offscreen target). The boot pre-compile ran against the canvas, but every scene draw goes into the
+  composer's HDR target, so about 50 of 128 programs were built twice. It now compiles against that target, hidden pools
+  and props included: **81 programs**.
+- The volumetric cloud bake took 1.64 s of GPU at 2048×640. It is now sized by world detail: 1024×320 at Low.
+- The menu showcase's warm-up waits until after boot, and a timing-only GPU readback in the texture bake is gone.
+- Benchmark trap: Chrome writes its shader cache to disk asynchronously. A browser closed seconds after boot loses it,
+  and the next "warm" boot is really cold.
+
+**Download.** The release build bundles, minifies and code-splits the game with esbuild. Online play and other lazy
+parts are separate chunks. Every chunk has a content-hashed name and is cached as immutable, and the entry's imports are
+preloaded. Development still runs the sources as they are.
+
+- 73 JS files and 1.25 MB gzip (the old `dist/`) → **27 files and 0.79 MB gzip**.
+- The main menu loads the stage thumbnails only; the full stage art loads on the stage screen.
+
+**Frame time on a phone-class CPU** (4× CPU, Auto, sound on, a 4 v 4 autopilot match on Tidewater):
+
+| | Before | After |
+|---|---|---|
+| Frame rate (median of 3) | 17.3 fps | 19.8 fps |
+| Render submit per frame | ~16.9 ms | ~12.3 ms |
+| Draw calls per frame | ~149 | ~99 |
+
+What the profiles and traces found, and what changed:
+
+- **Forced layouts.** Per-frame reads of `window.innerWidth` / `innerHeight` (renderer resize check, HUD, map pins) and
+  of the ink tank canvas's `clientWidth` made the browser recompute style and layout mid-frame, after the HUD had
+  already changed the DOM. In a 4 s trace, 270 of 345 ms of style and layout work was forced this way. Per-frame code
+  now reads a viewport size kept by one `resize` listener (`view` in `src/core/ctx.js`).
+- **Audio node churn.** Every sound effect built its own synth graph when played, about 18 Web Audio nodes. A match
+  plays about 40 sounds a second, so that was about 900 node creations a second. Now each one-shot's first play is
+  synthesized live while it renders offline into three takes; later plays replay a take through one buffer source.
+  Result: 4.9 nodes per sound and 438 node creations a second (the rest is the music sequencer and loops). Offline
+  takes match live renders in length (to −60 dB) and peak. Muted sound effects build nothing.
+- **Minimap.** Its ink field was recomputed per pixel at 7 px/m, the density of the old full-screen TAB map. It now
+  follows world detail (7 / 5 / 3.5 px/m), recomposes only when something on it changed, and is skipped while hidden.
+  Its share of CPU samples fell from 6.9 % to 2.2 %.
+- **Draw calls.** The 8 squidkids were about 94 of 155 draw calls per frame at Low. With Low shadows only their bodies
+  cast shadows: squidkid shadow-pass draws went from about 21 to about 8 per frame. The hair, weapon and bomb shadows
+  were smaller than a texel of that map anyway. Distant squidkids skip the tank's glass shell.
+
+Measured and left alone:
+
+- **Squidkid mesh detail.** The squidkids are about half the frame's triangles at Low (645k with them, 331k hidden,
+  shadows included). Hiding them changed GPU time by 0.04 ms per frame (8.39 vs 8.35 ms, interleaved), so LOD meshes
+  would not pay. On this class of hardware the limit is CPU work per draw call, not vertices.
+
+Still on the table at 4× CPU:
+
+- about 17 ms of simulation and 12 ms of render submit per frame, then about 4 ms of HUD and menu updates;
+- the browser's own style and paint, about 8 ms;
+- the music sequencer, about 2 ms: it still synthesizes every note live.
 
 ## Driver resets
 

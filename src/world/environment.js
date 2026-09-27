@@ -3,7 +3,7 @@
 // pier pilings + dock details hugging the deck, and far scenery (skyline, port cranes, lighthouse, islands, bridge,
 // ferris wheel, sailboats, buoys, gulls). All far scenery fades into the sky with a sky-matched aerial haze.
 //
-// const env = new Environment(renderer, scene, { bounds, theme: 'day'|'sunset'|'golden', shadowSize, shadowSoft, footprint })
+// const env = new Environment(renderer, scene, { bounds, theme: 'day'|'sunset'|'golden', shadowSize, shadowSoft, cloudSize: [w, h], footprint })
 //   footprint (optional): array of {minX,maxX,minZ,maxZ} rects = the deck slab's XZ outline (default [bounds]).
 //   Used for pilings, water foam, under-deck shading and the analytic deck shadow on the water.
 //   setTheme(name) switches light/sky/sea in place; rebuildForArena(bounds, footprint) follows a stage change.
@@ -183,7 +183,6 @@ vec3 applyHaze(vec3 col, vec3 wp) {
 // ray-marches a field of cumulus heaps (1.1–3 km altitude, out to 55 km) with a short light march toward the sun
 // (self-shadowed bellies, lit cauliflower tops, forward-scattered silver lining) and aerial perspective, and stores
 // premultiplied radiance + opacity. Re-baked on theme change (sun/sky colours); per frame the sky is one texture fetch.
-const CLOUD_W = 2048, CLOUD_H = 640;
 const CLOUD_BAKE_FRAG = /* glsl */`
 ${GLSL_SKY_COMMON}
 uniform vec2 uRes;
@@ -1341,6 +1340,7 @@ export class Environment {
     this.footprint = (opts.footprint && opts.footprint.length ? opts.footprint : [this.bounds]).slice(0, MAX_RECTS).map((r) => ({ ...r }));
     this.shadowSize = opts.shadowSize || 4096;
     this.shadowSoft = opts.shadowSoft !== false;   // false: one hardware-filtered tap (renderer.js patchShadowFilter)
+    [this.cloudW, this.cloudH] = opts.cloudSize || [2048, 640];   // cloud bake target (graphics: world detail)
     this.waterY = WATER_Y;
     this.time = 0;
     this.theme = null;
@@ -1428,6 +1428,15 @@ export class Environment {
     this._fitShadow();   // normal bias follows the texel size
   }
 
+  // Graphics settings (world detail): cloud bake resolution. The bake is a volumetric raymarch whose GPU cost scales
+  // with its pixels (1.6 s at 2048×640 on an Intel UHD 630); a new size re-bakes the clouds and the sky probe.
+  setCloudSize(w, h) {
+    if (w === this._cloudRT.width && h === this._cloudRT.height) return;
+    this._cloudRT.setSize(w, h);
+    this._cloudMat.uniforms.uRes.value.set(w, h);
+    if (this._T) { this._bakeClouds(this._T); this._rebuildEnvMap(); }
+  }
+
   // Graphics settings: planar reflection size (share of the drawing buffer, 0 = off) and whether actors / FX reflect.
   setReflections(scale, actors) { this.reflScale = scale; this.reflActors = !!actors; }
 
@@ -1485,7 +1494,7 @@ export class Environment {
   }
 
   _initCloudBake() {
-    this._cloudRT = new THREE.WebGLRenderTarget(CLOUD_W, CLOUD_H, {
+    this._cloudRT = new THREE.WebGLRenderTarget(this.cloudW, this.cloudH, {
       type: THREE.HalfFloatType, format: THREE.RGBAFormat, colorSpace: THREE.NoColorSpace,
       minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, generateMipmaps: false,
       wrapS: THREE.RepeatWrapping, wrapT: THREE.ClampToEdgeWrapping, depthBuffer: false, stencilBuffer: false,
@@ -1493,7 +1502,7 @@ export class Environment {
     this.U.uCloudTex.value = this._cloudRT.texture;
     this._cloudMat = new THREE.ShaderMaterial({
       name: 'CloudBake', vertexShader: 'void main() { gl_Position = vec4(position.xy, 0.0, 1.0); }', fragmentShader: CLOUD_BAKE_FRAG,
-      uniforms: { ...this.U, uRes: { value: new THREE.Vector2(CLOUD_W, CLOUD_H) }, uSunCol: { value: new THREE.Color() }, uSeed: { value: 3.0 }, uCov: { value: 0.46 } },
+      uniforms: { ...this.U, uRes: { value: new THREE.Vector2(this.cloudW, this.cloudH) }, uSunCol: { value: new THREE.Color() }, uSeed: { value: 3.0 }, uCov: { value: 0.46 } },
       depthTest: false, depthWrite: false, toneMapped: false,
     });
     const g = new THREE.BufferGeometry();
@@ -1517,10 +1526,10 @@ export class Environment {
     const rt = this._cloudRT;
     r.setRenderTarget(rt);
     r.setClearColor(0x000000, 0); r.clear(true, false, false);
-    const strips = 10, h = Math.ceil(CLOUD_H / strips);
+    const W = this._cloudRT.width, H = this._cloudRT.height, strips = 10, h = Math.ceil(H / strips);
     rt.scissorTest = true;
     for (let i = 0; i < strips; i++) {
-      rt.scissor.set(0, i * h, CLOUD_W, Math.min(h, CLOUD_H - i * h));
+      rt.scissor.set(0, i * h, W, Math.min(h, H - i * h));
       r.setRenderTarget(rt);
       r.render(this._cloudScene, this._cloudCam);
       r.getContext().flush();
@@ -2751,7 +2760,7 @@ export class Environment {
   }
 
   setTheme(name) {
-    const T = THEMES[name] || THEMES.day;
+    const T = (this._T = THEMES[name] || THEMES.day);
     const r0 = this.renderer;
     this.theme = THEMES[name] ? name : 'day';
     const U = this.U;

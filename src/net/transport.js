@@ -22,8 +22,28 @@ const randId = (n) => { const b = new Uint8Array(n); crypto.getRandomValues(b); 
 export async function openTransport(code, opts = {}) {
   if (opts.local) return new LocalTransport(code, opts);
   const t = new TrysteroTransport();
-  await t.open(code);
+  await t.open(code, NET.turn && NET.turn.length ? NET.turn : await fetchTurn());
   return t;
+}
+
+// TURN relay credentials from the site's own Worker (worker/turn.js): lets players whose networks block a direct link
+// (mobile carrier NAT, campus / office Wi-Fi) still connect. Fetched per room joined — they expire after a few hours.
+// Anything wrong (a dev server without the Worker, not configured, rate-limited, offline, malformed) → no relay: direct
+// connections only, as before.
+const ICE_URL = /^(turns?|stun):[a-z0-9.-]{1,253}(:\d{1,5})?(\?transport=(udp|tcp))?$/i;
+async function fetchTurn() {
+  if (typeof fetch !== 'function' || location.protocol !== 'https:') return [];   // the Worker is only on the hosted site
+  try {
+    const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 4000);
+    const res = await fetch('/api/turn', { method: 'POST', signal: ctl.signal, cache: 'no-store', credentials: 'omit' });
+    clearTimeout(timer);
+    if (!res.ok) return [];
+    const data = await res.json();
+    const ok = (v) => typeof v === 'string' && v.length > 0 && v.length <= 512;
+    return (Array.isArray(data && data.iceServers) ? data.iceServers.slice(0, 8) : [])
+      .map((e) => ({ urls: (Array.isArray(e && e.urls) ? e.urls : []).filter((u) => typeof u === 'string' && ICE_URL.test(u)).slice(0, 12), username: e && e.username, credential: e && e.credential }))
+      .filter((e) => e.urls.length && ok(e.username) && ok(e.credential));
+  } catch { return []; }
 }
 
 class TrysteroTransport {
@@ -32,16 +52,16 @@ class TrysteroTransport {
     this.room = null; this.selfId = null; this.closed = false;
   }
 
-  async open(code) {
+  async open(code, turn = []) {
     // loaded on demand: offline players never download the signaling stack
     const T = await import('../../vendor/trystero/nostr/index.mjs');
     this.selfId = T.selfId;
     const cfg = { appId: NET.appId, password: 'inkwave:' + code };
-    if (NET.turn && NET.turn.length) cfg.turnConfig = NET.turn;
+    if (turn.length) cfg.turnConfig = turn;
     if (NET.relays && NET.relays.length) cfg.relayConfig = { urls: NET.relays };
     this.room = T.joinRoom(cfg, code, {
-      // SDP exchanged but no direct route (strict NAT on both sides): the host relays game packets between members
-      // it *can* reach, but a member who can't reach the host can't play — surface it
+      // SDP exchanged but no route, even through the TURN relay when there is one: the host relays game packets between
+      // members it *can* reach, but a member who can't reach the host can't play — surface it
       onJoinError: (d) => { if (!this.closed) this.onError?.(d && d.error ? String(d.error).slice(0, 200) : 'connection failed'); },
     });
     this.act = this.room.makeAction('iw');

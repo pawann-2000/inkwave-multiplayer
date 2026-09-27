@@ -9,7 +9,7 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
 import { FXAAPass } from 'three/addons/postprocessing/FXAAPass.js';
-import { G } from './ctx.js';
+import { G, view } from './ctx.js';
 
 const GradeShader = {
   uniforms: {
@@ -73,6 +73,21 @@ const GradeShader = {
 					shadow = texture( shadowMap, shadowCoord.xyz );
 				}`);
 })();
+
+// three keys shader programs on the render target they draw into (tone mapping and output colour space differ between
+// the canvas and a render target), and compile() only visits visible objects. Pre-compile against the target a scene is
+// really drawn into — hidden objects included on request — or the first frames compile everything again, synchronously
+// (measured: ~50 of 128 boot programs were built twice). compile() runs synchronously inside compileAsync, so the
+// target and visibility are restored before this returns; only the completion polling is async.
+export function compileAsyncFor(renderer, scene, camera, target = null, { includeHidden = false } = {}) {
+  const prev = renderer.getRenderTarget(), shown = [];
+  if (includeHidden) scene.traverse((o) => { if (!o.visible) { o.visible = true; shown.push(o); } });
+  renderer.setRenderTarget(target);
+  try { return renderer.compileAsync(scene, camera); } finally {
+    renderer.setRenderTarget(prev);
+    for (const o of shown) o.visible = false;
+  }
+}
 
 export class Renderer {
   constructor(container, profile) {
@@ -184,7 +199,7 @@ export class Renderer {
   }
 
   resize() {
-    const w = window.innerWidth, h = window.innerHeight;
+    const w = view.w, h = view.h;
     if (w === this._w && h === this._h) return;
     this._w = w; this._h = h;
     this.renderer.setSize(w, h);
@@ -194,7 +209,7 @@ export class Renderer {
   }
 
   render() {
-    this.resize();
+    if (view.w !== this._w || view.h !== this._h) this.resize();
     // colour grade recommended by the environment theme (day / dusk)
     const gr = G.env && G.env.grade;
     if (gr && gr !== this._gradeSrc && this.grade) {

@@ -1,5 +1,6 @@
 @import url('hud.css');
 @import url('lobby.css');
+@import url('touch.css');
 /* =====================================================================================
    INKWAVE — UI (menus + HUD). Everything is namespaced .iw-*.
    Sizing unit --u = 1/100 of a 16:9 frame fitted to the viewport (16px at 1600x900).
@@ -28,6 +29,10 @@
   color: #fff; line-height: 1.2;
   -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
+}
+/* phones in landscape (~390 px tall): the 16:9 layout's text floors outgrow its boxes — lower floors keep it inside */
+@media (max-height: 520px) {
+  .iw-ui, .iw-hud, .iw-hud-over { --fs-xs: max(9px, calc(var(--u) * .8)); --fs-s: max(10px, calc(var(--u) * .95)); --fs-m: max(11px, calc(var(--u) * 1.1)); --fs-l: max(13px, calc(var(--u) * 1.4)); }
 }
 .iw-ui *, .iw-hud *, .iw-hud-over * { box-sizing: border-box; }
 .iw-ui svg, .iw-hud svg, .iw-hud-over svg { display: block; overflow: visible; }
@@ -473,6 +478,8 @@
 .iw-tab i { display: block; width: 1.35em; height: 1.35em; }
 .iw-tab i svg { width: 100%; height: 100%; }
 .iw-tab:hover { color: #fff; }
+/* short screens (phones in landscape): the unselected tabs shrink to their icon so every tab stays reachable */
+@media (max-height: 520px) { .iw-tab:not(.is-sel) { flex: none; padding: 0 .75em; } .iw-tab:not(.is-sel) > span { display: none; } }
 .iw-tab.is-sel { color: var(--a-ink); animation: iw-tab-pop .4s var(--spring); }
 @keyframes iw-tab-pop { 0% { scale: .85; } }
 
@@ -1565,3 +1572,15 @@ circle.iw-ico-cut { fill: var(--cut, #fff); }
 /* stage select: keep the header subtitle clear of the hero's corner splat; tickets never touch the hero */
 .iw-ss__splat:not(.is-b) { left: auto; right: calc(var(--u) * 16); top: calc(var(--u) * -3.2); width: calc(var(--u) * 9); }
 .iw-ss__left { width: calc(var(--u) * 24.6); }
+
+/* ------------------------------------------------------------------ short screens (phones in landscape)
+   The two densest columns scroll under a finger instead of running off the bottom (menus.js keeps the focused
+   control in view for keys / pads); padding keeps focus rings and glows inside the scroll box. */
+@media (max-height: 520px) {
+  .iw-vscroll { overflow-y: auto; overscroll-behavior: contain; touch-action: pan-y; scrollbar-width: none; }
+  .iw-vscroll::-webkit-scrollbar { display: none; }
+  .iw-ss__left { top: calc(var(--u) * 8.8); bottom: 0; left: calc(var(--u) * 2 + var(--sal)); width: calc(var(--u) * 29.6); padding: calc(var(--u) * 1.6) calc(var(--u) * 3.4) calc(var(--u) * 1.6) calc(var(--u) * 1.6); }
+  .iw-loadout__body { top: calc(var(--u) * 8.8); bottom: 0; left: calc(var(--u) * 2 + var(--sal)); width: min(calc(var(--u) * 57.2), calc(56vw + var(--u) * 3.2)); padding: calc(var(--u) * 1.6); }
+  .iw-setrow--stack .iw-pips { display: none; }
+  .iw-stat { grid-template-columns: calc(var(--fs-xs) * 11) 1fr calc(var(--u) * 2.4); }   /* icon + "INK COVERAGE" at the small floor */
+}

@@ -11,6 +11,12 @@ export const G = {
   mode: 'boot',                  // 'boot' | 'menu' | 'match'
 };
 
+// Viewport size in CSS px, refreshed on 'resize'. Per-frame code reads this, never window.innerWidth / innerHeight:
+// those force a synchronous style + layout pass whenever the DOM changed since the last one (the HUD changes it every
+// frame), which doubled the page's layout work.
+export const view = { w: typeof window === 'undefined' ? 0 : innerWidth, h: typeof window === 'undefined' ? 0 : innerHeight };
+if (typeof window !== 'undefined') addEventListener('resize', () => { view.w = innerWidth; view.h = innerHeight; });
+
 const listeners = new Map();
 export function on(name, fn) {
   if (!listeners.has(name)) listeners.set(name, new Set());

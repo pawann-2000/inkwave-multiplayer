@@ -1,4 +1,5 @@
-// INKWAVE — procedural SFX engine (Web Audio). No audio files: every sound is synthesized per play.
+// INKWAVE — procedural SFX engine (Web Audio). No audio files: every sound is synthesized in code (repeats of a
+// one-shot replay an offline render of it — see BAKE_TAKES).
 //
 //   import { audio } from './audio.js';
 //   audio.init()                                   // idempotent; call from a user gesture (also inits music)
@@ -23,6 +24,11 @@ import {
 } from './music.js';
 
 const MAX_VOICES = 48;   // one-shots alive at once (oldest stolen beyond this)
+// Baked one-shots: a sound's first play is synthesized live (its builder makes a ~15-node graph per play) while it is
+// rendered offline, off the main thread, into BAKE_TAKES mono takes; later plays are one buffer source each, pitch and
+// jitter via playback rate. A match plays ~40 sounds a second, so this cuts ~700 audio-node creations a second to
+// ~200 and drops the audio thread's per-voice synthesis. Stateful (def.live) and long sounds always play live.
+const BAKE_TAKES = 3, BAKE_MAX_S = 1.6;
 const MAX_LOOPS = 24;
 const taper = (v) => Math.pow(Math.min(1, Math.max(0, +v || 0)), 1.5);
 const validPos = (p) => !!p && Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z);
@@ -92,6 +98,7 @@ export class AudioEngine {
     this.hrtf = opts.hrtf ?? true;
     this.vol = { master: DEFAULT_SETTINGS.master ?? 0.8, music: DEFAULT_SETTINGS.music ?? 0.6, sfx: DEFAULT_SETTINGS.sfx ?? 0.85 };
     this.byName = new Map(); this.voices = []; this.loops = new Set(); this.last = new Map();
+    this.bank = new Map();   // name → baked takes (filling in) | null = never bake this one
     this.L = { x: 0, y: 0, z: 0 };
     this.rng = opts.seed != null ? mulberry32(opts.seed) : Math.random;
     this.counts = { played: 0, dropped: 0, stolen: 0 };
@@ -246,6 +253,30 @@ export class AudioEngine {
     voice.v.kill(now + 0.03);
   }
 
+  // All takes of a sound render in one offline context, back to back (a slot is the live play's length × 1.5: room for
+  // the builder's random variation), then are cut apart.
+  _bake(name, d, dur) {
+    if (this.offline || typeof OfflineAudioContext === 'undefined' || !(dur > 0) || dur > BAKE_MAX_S) { this.bank.set(name, null); return; }
+    const sr = this.ctx.sampleRate, slot = Math.ceil((dur * 1.5 + 0.05) * sr), takes = [];
+    this.bank.set(name, takes);   // plays stay live until the takes land
+    try {
+      const oc = new OfflineAudioContext(1, slot * BAKE_TAKES, sr), out = oc.createGain();
+      out.connect(oc.destination);
+      for (let k = 0; k < BAKE_TAKES; k++) d.build(new V(oc, out, (k * slot) / sr, this.rng), 1, {});
+      oc.startRendering().then((all) => {
+        const src = all.getChannelData(0);
+        for (let k = 0; k < BAKE_TAKES; k++) {
+          const take = src.subarray(k * slot, (k + 1) * slot);
+          let n = slot;
+          while (n > 1 && Math.abs(take[n - 1]) < 1e-4) n--;   // trim the silent tail (-80 dB): the voice ends with the sound
+          const b = this.ctx.createBuffer(1, n, sr);
+          b.copyToChannel(take.subarray(0, n), 0);
+          takes.push(b);
+        }
+      }, () => this.bank.set(name, null));
+    } catch (e) { this.bank.set(name, null); }   // can't bake this one: it stays live
+  }
+
   _def(name) {
     const d = SFX[name];
     if (!d && !this._warned.has(name)) { this._warned.add(name); console.warn('[audio] unknown sound', name); }
@@ -253,7 +284,7 @@ export class AudioEngine {
   }
 
   play(name, o = {}) {
-    if (!this.ctx) return null;
+    if (!this.ctx || !(this.vol.master > 0) || !(this.vol.sfx > 0)) return null;   // muted: build nothing
     const d = this._def(name);
     if (!d) return null;
     o = o || {};
@@ -277,9 +308,13 @@ export class AudioEngine {
     const pitch = Math.max(0.05, o.pitch ?? 1) * (1 + (this.rng() * 2 - 1) * (d.jitter ?? 0.06));
     const voice = this._voice(d, t, o.pos, vol);
     const v = voice.v;
+    const takes = d.build && !d.live ? this.bank.get(name) : null;
     try {
-      if (d.build) d.build(v, pitch, o);
-      else if (d.loop) {
+      if (takes && takes.length) v.sample(takes[Math.floor(this.rng() * takes.length) % takes.length], t, pitch);
+      else if (d.build) {
+        d.build(v, pitch, o);
+        if (takes === undefined) this._bake(name, d, v.end - t);
+      } else if (d.loop) {
         // loop sound fired as a one-shot: short burst with a fade out
         const len = d.oneShot ?? 1.2;
         voice.burst = true;
@@ -390,7 +425,7 @@ export class AudioEngine {
 /* ------------------------------------------------------------------------------------------------------------
  * Sound definitions. build(v, pitch, opts) for one-shots; loop(v, pitch, opts) → { pitch(q, now) } for loops.
  * v.t = start time, v.out = voice output. gain = voice level, max = voices per name, jitter = random pitch ±,
- * reverb = plaza send, minGap = merge window.
+ * reverb = plaza send, minGap = merge window, live = never bake (the builder keeps state between plays).
  * ----------------------------------------------------------------------------------------------------------*/
 export const SFX = {};
 const def = (name, o) => { SFX[name] = o; };
@@ -839,7 +874,7 @@ def('land', {
 // Combo state is per AudioContext, so offline renders (tools/audio-test) stay independent.
 const _hitCombo = new WeakMap();
 def('hit_marker', {
-  gain: 0.48, max: 4, jitter: 0, reverb: 0, minGap: 0.035,
+  gain: 0.48, max: 4, jitter: 0, reverb: 0, minGap: 0.035, live: true,   // stateful (combo climb): never baked
   build(v, p) {
     let st = _hitCombo.get(v.ctx);
     if (!st) _hitCombo.set(v.ctx, (st = { t: -9, n: 0 }));

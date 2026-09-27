@@ -31,6 +31,7 @@
 
 - **Turf war, 4 v 4.** Three minutes, most ground painted wins. Play against bots on three difficulty levels.
 - **Online with friends.** Host a room, share a code or link, and play up to 4 v 4, peer-to-peer with no account and no game server. Bots fill the empty slots.
+- **Plays on phones and tablets.** Touch controls built for two thumbs (a floating move stick, drag-to-aim, FIRE / SWIM / SUB you hold and slide to keep aiming), menus that fit a landscape phone, and Auto graphics that start phones light.
 - **Squid form.** Hold to dive into your ink: swim fast, refill your tank, climb inked walls, dolphin-jump water gaps.
 - **Seven weapons**, each with its own feel: Spritzer (shooter), Swell Roller, Glint Charger, Popper Blaster, Twinfin Dualies (dodge roll), Tidebucket Slosher and Gyre Splatling. Every kit comes with Splat Bombs and a special.
 - **Three stages, day or dusk.** Tidewater Plaza, Kelpline Terminal and Halyard Marina, a working marina with a car ferry moored across the middle where the water gaps are the whole point.
@@ -46,19 +47,22 @@
 
 ## Controls
 
-| Action | Keyboard / mouse | Gamepad |
-|---|---|---|
-| Move | <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> | Left stick |
-| Aim | Mouse | Right stick |
-| Fire | Left click | RT |
-| Squid form | <kbd>Shift</kbd> | LT |
-| Jump / dodge roll | <kbd>Space</kbd> | A |
-| Sub weapon (bomb) | Right click / <kbd>E</kbd> | RB |
-| Special | <kbd>F</kbd> | Y |
-| Map + Super Jump | Hold <kbd>Tab</kbd> or <kbd>M</kbd>, then <kbd>1</kbd>–<kbd>4</kbd> or click a pin | View |
-| Pause | <kbd>Esc</kbd> | Start |
+| Action | Keyboard / mouse | Gamepad | Touch |
+|---|---|---|---|
+| Move | <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> | Left stick | Left thumb: a stick appears where you press |
+| Aim | Mouse | Right stick | Drag anywhere on the right half |
+| Fire | Left click | RT | Hold **FIRE**, slide to keep aiming |
+| Squid form | <kbd>Shift</kbd> | LT | Hold **SWIM** |
+| Jump / dodge roll | <kbd>Space</kbd> | A | **JUMP** |
+| Sub weapon (bomb) | Right click / <kbd>E</kbd> | RB | Hold **SUB** to aim, release to throw |
+| Special | <kbd>F</kbd> | Y | **SPECIAL** (pulses when ready) |
+| Map + Super Jump | Hold <kbd>Tab</kbd> or <kbd>M</kbd>, then <kbd>1</kbd>–<kbd>4</kbd> or click a pin | View | **MAP**, then tap a teammate's pin |
+| Pause | <kbd>Esc</kbd> | Start | **PAUSE** |
 
 Gamepads work on the hosted (https) version. On a plain `http://` LAN address browsers block the Gamepad API.
+
+On a phone, play in landscape. On Android the game goes fullscreen when a match starts; on iPhone, **Share → Add to
+Home Screen** launches it fullscreen. Touch look speed and aim assist are under **Settings → Controls**.
 
 ## Online play
 
@@ -93,14 +97,18 @@ npm run check    # syntax-check every module
 npm test         # online-play protocol tests (node)
 npm run mptest   # 3 headless tabs play an online match and must agree (needs Chrome; see docs/NETWORK.md)
 npm run smoke    # boot + 8 s of autopilot in headless Chrome, fails on console errors
-npm run build    # assemble dist/ (game + only the three.js addons it imports)
+npm run touchtest  # a phone plays through real touch events (headless Chrome)
+npm run build    # release bundle in dist/: esbuild (pinned, run via npx) minifies + code-splits the game
 ```
 
 ## Deploying
 
-The game is hosted on Cloudflare Workers as static assets only (no server code): [`wrangler.jsonc`](wrangler.jsonc)
-serves `dist/`, and the build writes `dist/_headers` with a Content-Security-Policy that pins the page's inline scripts
-by hash, plus `nosniff`, `no-referrer`, COOP and a Permissions-Policy.
+The game is hosted on Cloudflare Workers as static assets: [`wrangler.jsonc`](wrangler.jsonc) serves `dist/`, and the
+build writes `dist/_headers` with a Content-Security-Policy that pins the page's inline scripts by hash, plus `nosniff`,
+`no-referrer`, COOP and a Permissions-Policy. The only server code is [`worker/turn.js`](worker/turn.js) on `/api/*`:
+it mints short-lived TURN relay credentials so players on strict networks (mobile data, campus Wi-Fi) can still join.
+Its one-time setup, a TURN key in the Cloudflare dashboard plus two Worker secrets, is in
+[docs/NETWORK.md](docs/NETWORK.md#turn-relay).
 
 ```bash
 npx wrangler@4.141.0 login                         # once
@@ -117,14 +125,15 @@ node tools/check-deploy.mjs <url>                  # headers, CSP, the game boot
 - **Systems talk through events.** Weapons, actors and the match emit typed events; effects, HUD and audio subscribe. The contract is documented in [`docs/EVENTS.md`](docs/EVENTS.md) and [`docs/CONTRACTS.md`](docs/CONTRACTS.md).
 - **Deterministic tooling.** The game exposes a freeze/step debug interface so filmstrips, handling measurements and bot simulations are reproducible frame by frame (`tools/film.py`, `tools/measure-handling.mjs`).
 
-Rendering is three.js r186 (vendored, plain ES modules with an import map) with GTAO, bloom and a custom grade pass. Graphics
-default to **Auto**: a first guess from the GPU, then an in-match governor that settles on the level the machine holds at
-60 fps. See [`docs/GRAPHICS.md`](docs/GRAPHICS.md) for the options, what each costs and how it was measured.
+Rendering is three.js r186 (vendored, plain ES modules with an import map; the release build bundles and minifies them)
+with GTAO, bloom and a custom grade pass. Graphics default to **Auto**: a first guess from the GPU, then an in-match
+governor that settles on the level the machine holds at 60 fps. See [`docs/GRAPHICS.md`](docs/GRAPHICS.md) for the
+options, what each costs, and the measured work on boot time, download size and phone performance.
 
 ## Browser support
 
 Chrome and Edge are the target; Firefox works. Safari runs but is slower. Integrated graphics run well on Auto or Low; High and
-Ultra want a discrete GPU. **Settings → Video / Graphics** has the presets, a render-resolution slider, a frame-rate limit
+Ultra want a discrete GPU. Phones and tablets play in landscape with the touch controls. **Settings → Video / Graphics** has the presets, a render-resolution slider, a frame-rate limit
 and every effect individually (shadows, anti-aliasing, ambient occlusion, bloom, reflections, effects, world detail).
 
 ## Contributing

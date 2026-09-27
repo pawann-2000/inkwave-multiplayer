@@ -1,8 +1,8 @@
 // INKWAVE — boot, main loop and game-flow orchestration (menus ⇄ attract mode ⇄ matches ⇄ results).
 import * as THREE from 'three';
-import { G, on, emit, clamp, damp } from './core/ctx.js';
-import { Renderer } from './core/renderer.js';
-import { Input } from './core/input.js';
+import { G, on, emit, clamp, damp, view } from './core/ctx.js';
+import { Renderer, compileAsyncFor } from './core/renderer.js';
+import { Input, primaryTouch } from './core/input.js';
 import { resolveGfx, migrateGfxSettings, gpuInfo, gpuTier, TIER_RUNG, AUTO_LADDER, AutoGovernor, GFX_KEYS } from './core/gfx.js';
 import { mapTheme,
   DEFAULT_SETTINGS, TEAM_PALETTES, COLORBLIND_PALETTE, TEAM_NAMES, WEAPONS, WEAPON_ORDER, SUB, SPECIALS,
@@ -26,6 +26,7 @@ import { Minimap } from './game/minimap.js';
 import { Showcase } from './game/showcase.js';
 import { Session } from './net/session.js';
 import { NetMatch } from './net/netmatch.js';
+import { TouchControls } from './ui/touch.js';
 
 const params = new URLSearchParams(location.search);
 // online dev/test: ?net=local runs rooms over BroadcastChannel between tabs of this browser (no network), and
@@ -54,14 +55,22 @@ function loadRaw(key) { try { return JSON.parse(localStorage.getItem(key)); } ca
 function saveJSON(key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } catch { /* private mode */ } }
 const DEFAULT_PROFILE = { name: 'Player', level: 1, xp: 0, wins: 0, matches: 0, totalTurf: 0, weapon: 'shooter' };
 
-async function loadModule(path, stubName) {
-  try { return await import(path); }
+// load(): a literal dynamic import, so the release bundler can split it into its own chunk
+async function loadModule(name, load, useStubs) {
+  try { return await load(); }
   catch (e) {
-    console.error(`[inkwave] failed to load ${path} — using stub`, e);
+    console.error(`[inkwave] failed to load ${name} — using stub`, e);
     const stubs = await import('./dev/stubs.js');
-    return stubName ? stubs : {};
+    return useStubs ? stubs : {};
   }
 }
+
+// in-match tutorial prompts, worded for the device in hand ([KEY] → keycap, {Btn} → pad glyph in the HUD)
+const HINT_KEYS = {
+  kbm: { swim: '[SHIFT]', special: 'Press [F]' },
+  pad: { swim: '{LT}', special: 'Press {Y}' },
+  touch: { swim: 'SWIM', special: 'Tap SPECIAL' },
+};
 
 class Game {
   async boot() {
@@ -104,12 +113,13 @@ class Game {
     this.netMatch = null;
 
     // UI first so the loading screen shows immediately
-    const [menusMod, hudMod] = await Promise.all([loadModule('./ui/menus.js'), loadModule('./ui/hud.js')]);
+    const [menusMod, hudMod] = await Promise.all([loadModule('ui/menus', () => import('./ui/menus.js')), loadModule('ui/hud', () => import('./ui/hud.js'))]);
     this.menus = G.menus = menusMod.Menus ? new menusMod.Menus(this.uiRoot, this._menuApi()) : null;
     this.hud = G.hud = hudMod.HUD ? new hudMod.HUD(this.uiRoot, { playSound: (n, o) => G.audio?.play(n, o) }) : null;
     // map diorama pins/finish live inside the HUD layer (under every other HUD element)
     try { const { DioramaOverlay } = await import('./ui/diorama.js'); this.diorama = new DioramaOverlay(this.hud ? this.hud.el : this.uiRoot); } catch (e) { console.error('[inkwave] diorama', e); this.diorama = null; }
     this.hud?.setVisible(false);
+    this._applyDevice(primaryTouch() ? 'touch' : 'kbm');
     this.menus?.show('loading');
     this.bootMarks = [];
     const progress = async (p, label) => { this.bootMarks.push([label, Math.round(performance.now() - t0)]); this.menus?.setLoading(p, label); await nextFrame(); };
@@ -128,6 +138,12 @@ class Game {
     this.input = G.input = new Input(this.R.renderer.domElement);
     this.input.onKey = (e, repeat) => this._onKey(e, repeat);
     this.input.onUnlock = () => this._onPointerUnlock();
+    this.input.onDevice = (d) => this._applyDevice(d);
+    this.touch = new TouchControls(this.uiRoot, this.input, { onPause: () => this.pause() });
+    // first gesture of any kind (key, click, tap) unlocks audio
+    addEventListener('pointerdown', () => this._unlockAudio(), { capture: true, passive: true });
+    // phones: turning to portrait covers the game (index.html #rotate, same query in styles/touch.css) — pause a live round
+    matchMedia('(pointer: coarse) and (orientation: portrait) and (max-width: 760px)').addEventListener('change', (e) => { if (e.matches) this.pause(); });
     // after a focus steal while the map was held, the next click on the game takes the mouse back (no pause detour)
     this.R.renderer.domElement.addEventListener('mousedown', () => {
       if (this._relock && G.mode === 'match' && this.match && !this.match.paused && !this.menus?.current) { this._relock = false; this.input.requestLock(); }
@@ -135,8 +151,9 @@ class Game {
 
     // modules built by other authors
     const [charMod, fxMod, envMod, audioMod, musicMod] = await Promise.all([
-      loadModule('./game/character.js', true), loadModule('./fx/fx.js', true), loadModule('./world/environment.js', true),
-      loadModule('./audio/audio.js', true), loadModule('./audio/music.js', true),
+      loadModule('game/character', () => import('./game/character.js'), true), loadModule('fx/fx', () => import('./fx/fx.js'), true),
+      loadModule('world/environment', () => import('./world/environment.js'), true),
+      loadModule('audio/audio', () => import('./audio/audio.js'), true), loadModule('audio/music', () => import('./audio/music.js'), true),
     ]);
     this.CharacterClass = charMod.Character;
     try { this.PropKit = (await import('./world/props.js')).PropKit; } catch (e) { console.error('[inkwave] prop kit failed to load', e); this.PropKit = null; }
@@ -154,7 +171,7 @@ class Game {
     await this._buildWorld(map);
     await progress(0.4, 'Filling the harbor…');
     const B = G.level.bounds;
-    G.env = new envMod.Environment(G.renderer, scene, { bounds: B, theme: this.theme, shadowSize: gp.shadowSize || 4096, shadowSoft: gp.shadowSoft, footprint: this._footprint(G.level) });
+    G.env = new envMod.Environment(G.renderer, scene, { bounds: B, theme: this.theme, shadowSize: gp.shadowSize || 4096, shadowSoft: gp.shadowSoft, cloudSize: gp.cloudBake, footprint: this._footprint(G.level) });
     G.env.setReflections?.(gp.reflScale, gp.reflActors);
     if (G.env.envMap) scene.environment = G.env.envMap;
     // lighting balance: less omnidirectional sky flood, more directional sky/ground fill → surfaces keep their form
@@ -190,7 +207,8 @@ class Game {
     await progress(0.85, 'Warming up…');
     this._warmup();
     // compile in parallel (KHR_parallel_shader_compile) so the loading screen keeps animating instead of freezing
-    try { await G.renderer.compileAsync(scene, camera); } catch { G.renderer.compile(scene, camera); }
+    // against the composer's HDR target (what every scene draw renders into), hidden pools / props included
+    await compileAsyncFor(G.renderer, scene, camera, this.R.composer.renderTarget1, { includeHidden: true });
     await progress(0.93, 'Warming up…');
     for (let i = 0; i < 3; i++) { this._frame(1 / 60); await nextFrame(); }
     await progress(1, 'Ready!');
@@ -289,7 +307,8 @@ class Game {
     scene.add(this.grateMesh);
     this.decor = new Decor(scene, level);
     G.nav = new NavGraph(level, G.physics);
-    this.minimap = new Minimap(level, G.paint);
+    this.minimap = new Minimap(level, G.paint, gp.minimapPx);
+    G.env?.setCloudSize?.(...gp.cloudBake);
     if (G.env?.rebuildForArena) G.env.rebuildForArena(level.bounds, this._footprint(level));
     else if (G.env?.setFootprint) G.env.setFootprint(this._footprint(level));
     if (G.teamColors[0]) this._setPalette(this.palette || this._pickPalette());
@@ -423,8 +442,7 @@ class Game {
   async _initGfx(refresh) {
     const gl = this.R.renderer.getContext();
     this.gpu = gpuInfo(gl);
-    const coarse = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches && !matchMedia('(pointer: fine)').matches;
-    this.gpu.tier = gpuTier(this.gpu.renderer, { deviceMemory: navigator.deviceMemory, cores: navigator.hardwareConcurrency, mobile: coarse });
+    this.gpu.tier = gpuTier(this.gpu.renderer, { deviceMemory: navigator.deviceMemory, cores: navigator.hardwareConcurrency, mobile: primaryTouch() });
     const saved = loadRaw('inkwave.gfxAuto');
     const known = saved && saved.gpu === this.gpu.renderer && Number.isInteger(saved.rung);
     this._gov = new AutoGovernor({
@@ -487,7 +505,7 @@ class Game {
     try { await this.texlib?.rebake?.(); } catch (e) { console.error('[inkwave] texture library rebake', e); }
     if (G.env?.setTheme) { G.env.setTheme(G.env.theme); if (G.env.envMap) G.scene.environment = G.env.envMap; }
     const cells = G.paint?.restore?.() ?? 0;
-    try { await G.renderer.compileAsync(G.scene, G.camera); } catch (e) { /* compiles on first draw instead */ }
+    try { await compileAsyncFor(G.renderer, G.scene, G.camera, this.R.composer.renderTarget1, { includeHidden: true }); } catch (e) { /* compiles on first draw instead */ }
     this._gpuLost = false;
     console.info(`[inkwave] graphics restored after a driver reset (${cells} ink cells repainted)`);
     const live = this.match && !this.match.attract;
@@ -524,9 +542,25 @@ class Game {
   _playMusic(t) { this._musicTrack = t; try { G.music?.play(t, { fade: 1.2 }); } catch (e) { /* not initialised yet */ } }
 
   // ---------------------------------------------------------------------------------------- input routing
+  // touch screens: a match goes fullscreen and locks to landscape where the browser allows it (Android; iPhone Safari has
+  // no element fullscreen). Only works inside the tap that started the match (user activation); refusals are fine.
+  _immersive() {
+    if (this.input.lastDevice !== 'touch' || document.fullscreenElement || !document.fullscreenEnabled) return;
+    document.documentElement.requestFullscreen({ navigationUI: 'hide' })
+      .then(() => screen.orientation?.lock?.('landscape'))
+      .catch(() => { /* declined or unsupported: play in the page */ });
+  }
+  _unlockAudio() {
+    if (this._audioOn) return;
+    this._audioOn = true; G.audio?.init?.(); this._applyAudioVolumes(); this._playMusic(this.menus?.current === 'title' || !this.menus ? 'title' : 'menu');
+  }
+  // device-dependent UI: body.is-touch (touch HUD layout, no keyboard glyphs) + the menus' prompts
+  _applyDevice(d) {
+    document.body.classList.toggle('is-touch', d === 'touch');
+    this.menus?.setInputMode(d);
+  }
   _onKey(e, repeat) {
-    // first gesture unlocks audio
-    if (!this._audioOn) { this._audioOn = true; G.audio?.init?.(); this._applyAudioVolumes(); this._playMusic(this.menus?.current === 'title' || !this.menus ? 'title' : 'menu'); }
+    this._unlockAudio();
     if (G.mode === 'match' && this.match && !this.match.paused && !this.menus?.current) {
       if (e.code === 'Escape' || e.code === 'KeyP') { this.pause(); return true; }
       return false;
@@ -573,7 +607,7 @@ class Game {
         const behind = v.z > 1;
         if (behind) { dx = -dx; dy = -dy; }
         if (!behind && Math.abs(dx) < 1 && Math.abs(dy) < 1) ang = dx >= 0 ? 0 : Math.PI;   // attacker on screen: ink the nearer side edge, never over them
-        else ang = Math.atan2(dy * innerHeight, dx * innerWidth);
+        else ang = Math.atan2(dy * view.h, dx * view.w);
       }
       this.hud?.damage(clamp(amount / 80, 0.15, 1), G.teamHex[victim.enemyTeam], ang);
       if (G.time - lastHurtSnd > 0.25) { lastHurtSnd = G.time; G.audio?.play('hurt', { volume: 0.7 }); }
@@ -742,6 +776,7 @@ class Game {
     this.lastMatchOpts = opts;
     G.audio?.init?.();
     this.input.requestLock();
+    this._immersive();
     this.menus?.show(null);
     await this._fade(1, 350);
     await this._prepareStage(opts.mapId, opts.time);
@@ -1119,13 +1154,15 @@ class Game {
       this.showcase.render();
     }
     const tC = performance.now();
-    const ps = this.perf || (this.perf = { sim: 0, render: 0, calls: 0, tris: 0 });
+    const ps = this.perf || (this.perf = { sim: 0, render: 0, ui: 0, calls: 0, tris: 0 });
     ps.sim += (tB - tA - ps.sim) * 0.05; ps.render += (tC - tB - ps.render) * 0.05;
     ps.calls = G.renderer.info.render.calls; ps.tris = G.renderer.info.render.triangles;
     // HUD
     if (m && !m.attract && this.hud && (m.state === 'playing' || m.state === 'intro' || m.state === 'finish')) this._updateHud(dt);
     this.menus?.update?.(dt);
+    this.touch?.update();
     this.input.endFrame();
+    ps.ui += (performance.now() - tC - ps.ui) * 0.05;   // HUD + menus + touch layer (DOM work; the browser's style / paint come after)
   }
 
   // continuous sounds tied to the local player's state (swim gurgle, wall climb, enemy-ink sizzle)
@@ -1212,15 +1249,16 @@ class Game {
   // team 0 = you).
   _updateHud(dt) {
     const m = this.match, a = m.local, cam = G.camera;
-    this.minimap.update(dt);
+    const showMap = this.settings.minimap !== false;
+    if (showMap) this.minimap.update(dt);
     const w = a.weapon;
     // crosshair spread = the weapon's live cone (first-shot accurate, blooms with sustained fire / in the air)
     const vHalf = (G.camera.fov * Math.PI) / 360;
     const coneDeg = a.weaponRunner.spread ?? (w.kind === 'shooter' ? 5.5 : w.kind === 'blaster' ? 1.2 : 0);
-    const spread = w.kind === 'roller' ? 28 : Math.min(90, (Math.tan((coneDeg * Math.PI) / 180) / Math.tan(vHalf)) * (innerHeight / 2));
+    const spread = w.kind === 'roller' ? 28 : Math.min(90, (Math.tan((coneDeg * Math.PI) / 180) / Math.tan(vHalf)) * (view.h / 2));
     const players = [];
     const t = { x: 0, y: 0 };
-    for (const o of m.actors) {
+    if (showMap) for (const o of m.actors) {
       if (!o.alive) continue;
       if (o.team !== a.team && !o.isLocal) {
         // enemies only show on the map when visible to your team (not submerged far away)
@@ -1232,7 +1270,7 @@ class Game {
     // ally markers
     const markers = [];
     const v = this._mv || (this._mv = new THREE.Vector3());
-    const W = innerWidth, H = innerHeight;
+    const W = view.w, H = view.h;
     for (const o of m.actors) {
       if (o.isLocal || o.team !== a.team || !o.alive) continue;
       if (o.character.getHeadPosition && o.form !== 'squid') { o.character.getHeadPosition(v); v.y += 0.45; }
@@ -1256,13 +1294,14 @@ class Game {
     let prompt = null;
     const inkF = a.ink / PLAYER.inkMax;
     if (m.state === 'playing' && a.alive) {
+      const k = HINT_KEYS[this.input.lastDevice] || HINT_KEYS.kbm;
       if (m.controller?.mapHeld) prompt = null;   // the map diorama carries its own super-jump hints
       else if (a.superJumpState) prompt = null;
-      else if (this._lowInkFlash > 0) { this._lowInkFlash -= dt; prompt = 'Low ink! Hold SHIFT in your ink to refill'; }
-      else if (a.specialReady() && (this._hints.specialT = (this._hints.specialT || 0) + dt) > 2) prompt = `Special ready! Press F`;
-      else if (inkF < 0.25 && a.form !== 'squid') prompt = 'Hold SHIFT to swim in your ink and refill';
+      else if (this._lowInkFlash > 0) { this._lowInkFlash -= dt; prompt = `Low ink! Hold ${k.swim} in your ink to refill`; }
+      else if (a.specialReady() && (this._hints.specialT = (this._hints.specialT || 0) + dt) > 2) prompt = `Special ready! ${k.special}`;
+      else if (inkF < 0.25 && a.form !== 'squid') prompt = `Hold ${k.swim} to swim in your ink and refill`;
       else if (m.duration - m.time < 8 && !this._hints.shot) prompt = 'Paint the ground — most turf wins!';
-      else if (m.online && !this.input.locked && this.input.lastDevice !== 'pad') prompt = 'Click to aim with the mouse';
+      else if (m.online && !this.input.locked && this.input.lastDevice === 'kbm') prompt = 'Click to aim with the mouse';
       if (!a.specialReady()) this._hints.specialT = 0;
       if (a.intent.fire) this._hints.shot = true;
     }
@@ -1277,7 +1316,7 @@ class Game {
       weapon: a.weaponId, charge: a.weaponRunner.charge,
       crosshair: { spread, onTarget: m.controller?.onTarget ? 'enemy' : null, inRange: m.controller ? m.controller.inRange !== false : true },
       // corner minimap follows the setting; the TAB map (needed for super jumps) is always available
-      map: (this.settings.minimap !== false) ? { canvas: this.minimap.canvas, expanded: false, players } : null,
+      map: showMap ? { canvas: this.minimap.canvas, expanded: false, players } : null,
       markers,
       prompt,
       fps: this.settings.showFps ? this.fps : undefined,

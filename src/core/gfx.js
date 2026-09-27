@@ -77,6 +77,9 @@ export function profileFromKnobs(k) {
     inkAnimDist: { low: 18, medium: 28, high: 40 }[k.gfxEffects], inkAnimHalfRate: k.gfxEffects === 'low',
     detail: k.gfxDetail, paintAtlas: k.gfxDetail === 'high' ? 4096 : 2048, paintDensity: k.gfxDetail === 'high' ? 30 : 18,
     texlibSize: k.gfxDetail === 'high' ? 512 : 256, levelLite: k.gfxDetail === 'low',
+    // volumetric cloud bake (once per theme): 1.6 s of GPU time at 2048×640 on an Intel UHD 630, a quarter at 1024×320
+    cloudBake: { high: [2048, 640], medium: [1536, 480], low: [1024, 320] }[k.gfxDetail],
+    minimapPx: { high: 7, medium: 5, low: 3.5 }[k.gfxDetail],   // corner minimap pixels per metre (its ink is redrawn per pixel)
   };
 }
 
