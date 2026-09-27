@@ -35,13 +35,15 @@ function cache(ctx) {
   return m;
 }
 
-// Seamlessly looping 2 s mono noise buffers: 'white' | 'pink' | 'brown'. RMS-normalised to ~0.3.
+// Seamlessly looping 2 s mono noise buffers: 'white' | 'pink' | 'brown'. RMS-normalised to ~0.3. Cached per sample
+// rate, not per context: an AudioBuffer can be shared by any number of contexts (the SFX engine's offline bakes reuse
+// the live context's buffers instead of regenerating them).
+const noiseCache = new Map();
 export function noiseBuffer(ctx, kind = 'white') {
-  const c = cache(ctx);
-  const key = 'noise:' + kind;
-  let b = c.get(key);
+  const sr = ctx.sampleRate, key = sr + ':' + kind;
+  let b = noiseCache.get(key);
   if (b) return b;
-  const sr = ctx.sampleRate, len = Math.floor(sr * 2);
+  const len = Math.floor(sr * 2);
   b = ctx.createBuffer(1, len, sr);
   const d = b.getChannelData(0);
   const rnd = mulberry32(kind === 'white' ? 11 : kind === 'pink' ? 23 : 37);
@@ -81,7 +83,7 @@ export function noiseBuffer(ctx, kind = 'white') {
   for (let i = 0; i < len; i++) ss += d[i] * d[i];
   const g = 0.3 / Math.sqrt(ss / len);
   for (let i = 0; i < len; i++) d[i] *= g;
-  c.set(key, b);
+  noiseCache.set(key, b);
   return b;
 }
 
@@ -276,6 +278,11 @@ export class V {
     else { s._end = Infinity; this.endless = true; }
     this.srcs.push(s); this.nodes.push(s);
     return s;
+  }
+  // one pre-rendered take (AudioEngine's baked one-shots), played once through and pitched by playback rate
+  sample(buf, t0, rate = 1, to = this.out) {
+    const s = this.ctx.createBufferSource(); s.buffer = buf; s.playbackRate.value = rate;
+    return this._src(s, t0, t0 + buf.duration / rate, to);
   }
   // LFO → param: returns { osc, depth(gain) }
   lfo(rate, depth, param, t0, t1, type = 'sine') {

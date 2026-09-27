@@ -10,8 +10,9 @@
 </p>
 
 <p align="center">
-  <a href="https://inkwave-aah.pages.dev"><b>▶ Play now</b></a> ·
+  <a href="https://inkwave-multiplayer.pawann931.workers.dev"><b>▶ Play now</b></a> ·
   <a href="#controls">Controls</a> ·
+  <a href="#online-play">Online play</a> ·
   <a href="#running-locally">Run locally</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="CONTRIBUTING.md">Contributing</a>
@@ -29,6 +30,8 @@
 ## Features
 
 - **Turf war, 4 v 4.** Three minutes, most ground painted wins. Play against bots on three difficulty levels.
+- **Online with friends.** Host a room, share a code or link, and play up to 4 v 4, peer-to-peer with no account and no game server. Bots fill the empty slots.
+- **Plays on phones and tablets.** Touch controls built for two thumbs (a floating move stick, drag-to-aim, FIRE / SWIM / SUB you hold and slide to keep aiming), menus that fit a landscape phone, and Auto graphics that start phones light.
 - **Squid form.** Hold to dive into your ink: swim fast, refill your tank, climb inked walls, dolphin-jump water gaps.
 - **Seven weapons**, each with its own feel: Spritzer (shooter), Swell Roller, Glint Charger, Popper Blaster, Twinfin Dualies (dodge roll), Tidebucket Slosher and Gyre Splatling. Every kit comes with Splat Bombs and a special.
 - **Three stages, day or dusk.** Tidewater Plaza, Kelpline Terminal and Halyard Marina, a working marina with a car ferry moored across the middle where the water gaps are the whole point.
@@ -44,19 +47,37 @@
 
 ## Controls
 
-| Action | Keyboard / mouse | Gamepad |
-|---|---|---|
-| Move | <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> | Left stick |
-| Aim | Mouse | Right stick |
-| Fire | Left click | RT |
-| Squid form | <kbd>Shift</kbd> | LT |
-| Jump / dodge roll | <kbd>Space</kbd> | A |
-| Sub weapon (bomb) | Right click / <kbd>E</kbd> | RB |
-| Special | <kbd>F</kbd> | Y |
-| Map + Super Jump | Hold <kbd>Tab</kbd> or <kbd>M</kbd>, then <kbd>1</kbd>–<kbd>4</kbd> or click a pin | View |
-| Pause | <kbd>Esc</kbd> | Start |
+| Action | Keyboard / mouse | Gamepad | Touch |
+|---|---|---|---|
+| Move | <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> | Left stick | Left thumb: a stick appears where you press |
+| Aim | Mouse | Right stick | Drag anywhere on the right half |
+| Fire | Left click | RT | Hold **FIRE**, slide to keep aiming |
+| Squid form | <kbd>Shift</kbd> | LT | Hold **SWIM** |
+| Jump / dodge roll | <kbd>Space</kbd> | A | **JUMP** |
+| Sub weapon (bomb) | Right click / <kbd>E</kbd> | RB | Hold **SUB** to aim, release to throw |
+| Special | <kbd>F</kbd> | Y | **SPECIAL** (pulses when ready) |
+| Map + Super Jump | Hold <kbd>Tab</kbd> or <kbd>M</kbd>, then <kbd>1</kbd>–<kbd>4</kbd> or click a pin | View | **MAP**, then tap a teammate's pin |
+| Pause | <kbd>Esc</kbd> | Start | **PAUSE** |
 
 Gamepads work on the hosted (https) version. On a plain `http://` LAN address browsers block the Gamepad API.
+
+On a phone, play in landscape. On Android the game goes fullscreen when a match starts; on iPhone, **Share → Add to
+Home Screen** launches it fullscreen. Touch look speed and aim assist are under **Settings → Controls**.
+
+## Online play
+
+**PLAY ONLINE → HOST A ROOM** gives you a room code and an invite link. Friends open the link, or choose
+**PLAY ONLINE → JOIN** and type the code. In the lobby everyone picks a team (up to 4 per side) and a weapon, and the
+host picks the stage and presses START. Empty slots can be filled with bots.
+
+Matches are peer-to-peer over WebRTC. Browsers find each other through public Nostr relays
+([Trystero](https://github.com/dmotz/trystero)), and all game data then flows directly between players. Everyone in a
+room can see the others' IP addresses, so share codes with people you trust. The authority model, wire protocol,
+configuration (TURN, pinned relays) and threat model are in [docs/NETWORK.md](docs/NETWORK.md).
+
+Online play needs a secure page: the hosted (https) version, or `http://localhost` on your own machine. Browsers
+withhold the WebCrypto API that WebRTC signaling uses on plain `http://` LAN addresses. To try it on one machine, open
+two tabs with `?net=local`: one hosts, the other joins with the code.
 
 ## Running locally
 
@@ -73,23 +94,47 @@ Useful URL parameters: `?map=halyard&time=dusk` picks a stage, `&autostart=180` 
 ```bash
 npm install      # once, for the headless tools
 npm run check    # syntax-check every module
+npm test         # online-play protocol tests (node)
+npm run mptest   # 3 headless tabs play an online match and must agree (needs Chrome; see docs/NETWORK.md)
 npm run smoke    # boot + 8 s of autopilot in headless Chrome, fails on console errors
-npm run build    # assemble dist/ (game + only the three.js addons it imports)
+npm run touchtest  # a phone plays through real touch events (headless Chrome)
+npm run build    # release bundle in dist/: esbuild (pinned, run via npx) minifies + code-splits the game
+```
+
+## Deploying
+
+The game is hosted on Cloudflare Workers as static assets: [`wrangler.jsonc`](wrangler.jsonc) serves `dist/`, and the
+build writes `dist/_headers` with a Content-Security-Policy that pins the page's inline scripts by hash, plus `nosniff`,
+`no-referrer`, COOP and a Permissions-Policy. The only server code is [`worker/turn.js`](worker/turn.js) on `/api/*`:
+it mints short-lived TURN relay credentials so players on strict networks (mobile data, campus Wi-Fi) can still join.
+Its one-time setup, a TURN key in the Cloudflare dashboard plus two Worker secrets, is in
+[docs/NETWORK.md](docs/NETWORK.md#turn-relay).
+
+```bash
+npx wrangler@4.141.0 login                         # once
+echo 'CLOUDFLARE_ACCOUNT_ID=<id>' > .env           # once: the target account (npx wrangler@4.141.0 whoami); .env is gitignored
+npm run deploy                                     # build + upload
+node tools/check-deploy.mjs <url>                  # headers, CSP, the game boots, an injected script is refused
 ```
 
 ## How it works
 
-- **Ink is painted in texture space.** Every paintable face owns a region of one 4K atlas; splats are drawn into it on the GPU while a coarse CPU grid keeps the turf score and gameplay queries in sync. The level shader layers the ink over the surface with its own height, gloss and wetness. See [`src/world/paint.js`](src/world/paint.js) and [`src/world/inkShading.js`](src/world/inkShading.js).
+- **Ink is painted in texture space.** Every paintable face owns a region of one atlas (4K at High world detail, 2K below); splats are drawn into it on the GPU while a coarse CPU grid keeps the turf score and gameplay queries in sync. The level shader layers the ink over the surface with its own height, gloss and wetness. See [`src/world/paint.js`](src/world/paint.js) and [`src/world/inkShading.js`](src/world/inkShading.js).
 - **Stages are data.** A layout is a list of boxes and ramps for one half of the arena; the other half is the 180° rotation, so both teams always get an identical field. Ambient occlusion is baked offline (`tools/bake-ao.mjs`). See [`src/world/maps.js`](src/world/maps.js).
 - **Characters are fully procedural.** Geometry, materials, a 60-bone rig and every animation (locomotion, squid form, weapon poses, secondary motion) are code, driven by a spring-based pose system. See [`docs/RIG.md`](docs/RIG.md).
 - **Systems talk through events.** Weapons, actors and the match emit typed events; effects, HUD and audio subscribe. The contract is documented in [`docs/EVENTS.md`](docs/EVENTS.md) and [`docs/CONTRACTS.md`](docs/CONTRACTS.md).
 - **Deterministic tooling.** The game exposes a freeze/step debug interface so filmstrips, handling measurements and bot simulations are reproducible frame by frame (`tools/film.py`, `tools/measure-handling.mjs`).
 
-Rendering is three.js r186 (vendored, plain ES modules with an import map) with GTAO, bloom and a custom grade pass.
+Rendering is three.js r186 (vendored, plain ES modules with an import map; the release build bundles and minifies them)
+with GTAO, bloom and a custom grade pass. Graphics default to **Auto**: a first guess from the GPU, then an in-match
+governor that settles on the level the machine holds at 60 fps. See [`docs/GRAPHICS.md`](docs/GRAPHICS.md) for the
+options, what each costs, and the measured work on boot time, download size and phone performance.
 
 ## Browser support
 
-Chrome and Edge are the target; Firefox works. Safari runs but is slower. A discrete or recent integrated GPU is recommended for the High preset; the settings menu has Medium and Low tiers.
+Chrome and Edge are the target; Firefox works. Safari runs but is slower. Integrated graphics run well on Auto or Low; High and
+Ultra want a discrete GPU. Phones and tablets play in landscape with the touch controls. **Settings → Video / Graphics** has the presets, a render-resolution slider, a frame-rate limit
+and every effect individually (shadows, anti-aliasing, ambient occlusion, bloom, reflections, effects, world detail).
 
 ## Contributing
 

@@ -4,7 +4,8 @@ export const GAME_TITLE = 'INKWAVE';
 export const GAME_SUBTITLE = 'Turf Riot';
 export const VERSION = '1.0.0';
 
-// Team ink palettes. Team 0 ("Alpha") is always the local player's team; a palette is picked per match.
+// Team ink palettes. Offline, team 0 ("Alpha") is always the local player's team; online you can be on either team
+// (HUD / results / intro are built relative to the local player's team). A palette is picked per match.
 export const TEAM_PALETTES = [
   { id: 'tangerine-cobalt', a: '#ff8a14', b: '#2f5bff', names: ['Tangerine', 'Cobalt'] },
   { id: 'bubblegum-mint', a: '#ff3f9e', b: '#18d48c', names: ['Bubblegum', 'Mint'] },
@@ -209,6 +210,31 @@ export const BOT_NAMES = [
   'Kelp', 'Drip', 'Tako', 'Sprinkle', 'Bubbles', 'Moxie', 'Juno', 'Wasabi', 'Fizz', 'Loop',
 ];
 
+// ---- Online play (peer-to-peer; see docs/NETWORK.md) ----
+export const NET = {
+  appId: 'inkwave-p2p',     // signaling namespace (Trystero appId) — changing it splits the player base
+  proto: 1,                 // wire protocol version; the lobby refuses peers that speak another one
+  codeLength: 10,           // room code symbols (Crockford base32 → 50 bits from the CSPRNG)
+  maxHumans: 8, teamMax: 4,
+  tickHz: 30,               // state snapshots (+ batched events) per second per peer
+  interpDelay: 0.1,         // s: remote squidkids are drawn this far in the past (covers ~3 snapshots of jitter)
+  extrapolate: 0.1,         // s: max dead reckoning past the newest snapshot before a remote actor holds still
+  joinTimeout: 20,          // s: no host heard from after joining → "room not found"
+  loadTimeout: 25,          // s: the host starts without peers still loading the stage (their squidkids go to bots)
+  // Static TURN relays for players behind strict NATs (symmetric / carrier-grade): [{ urls, username, credential }].
+  // Empty = on the hosted https site, short-lived Cloudflare TURN credentials from /api/turn (worker/turn.js) per room
+  // joined; elsewhere public STUN only. Either way the host relays game packets between members that can't link.
+  turn: [],
+  // Nostr relays used to find each other (signaling only). Empty = Trystero's built-in public list (a few of those are
+  // usually down at any time — harmless, the rest carry it). Pin your own wss:// relays here for a private deploy.
+  relays: [],
+  // Flood limits per sending peer (token buckets: [refill per s, burst]). Well above real play (a host with 7 bots
+  // peaks around 400 splats/s and 100 hits/s), well below what would stall a frame.
+  limits: { packets: [120, 240], splats: [1200, 2400], hits: [300, 600], control: [20, 40] },
+  maxDamage: 200,           // one hit: above the biggest real hit (bomb / slam 180, charger 160, roller 140)
+  maxSplatRadius: 4.5,      // m: above the biggest real splat (slam core 5.2 × 0.72 ≈ 3.7)
+};
+
 // ---- Progression ----
 export const PROGRESSION = {
   xpForLevel: (lvl) => 800 + lvl * 350,
@@ -219,11 +245,16 @@ export const PROGRESSION = {
 export const DEFAULT_SETTINGS = {
   sensitivity: 1.0,         // mouse multiplier 0.2..3
   padSensitivity: 1.0,
+  touchSensitivity: 1.0,     // touch-screen look drag multiplier 0.3..3
   invertY: false,
   fov: 82,                  // horizontal FOV at 16:9, 65..100
-  quality: 'high',          // 'low' | 'medium' | 'high' | 'ultra'
-  shadows: true,
-  bloom: true,
+  // graphics (src/core/gfx.js): a preset, or 'custom' = the gfx* knobs below (they start as High)
+  quality: 'auto',          // 'auto' | 'low' | 'medium' | 'high' | 'ultra' | 'custom'
+  gfxRes: 1, gfxDensity: 1.5, gfxShadows: 'high', gfxAA: 'msaa4', gfxAO: true, gfxBloom: true,
+  gfxRefl: 'medium', gfxEffects: 'high', gfxDetail: 'high',
+  gfxDynRes: true,          // manual presets: lower the resolution a notch while the frame rate is low (Auto adapts anyway)
+  fpsLimit: 0,              // 0 = the display's refresh rate
+  gfxV: 2,
   cameraShake: 1.0,         // 0..1
   showFps: false,
   master: 0.8, music: 0.6, sfx: 0.85,
@@ -234,13 +265,4 @@ export const DEFAULT_SETTINGS = {
   rumble: 1.0,              // gamepad vibration 0..1 (only while the pad is the last-used device)
   aimAssist: 1.0,           // gamepad aim assist 0..1
   aimAssistMouse: false,    // optional aim assist for mouse
-};
-
-// Quality presets consumed by the renderer + fx.
-export const QUALITY = {
-  // pixelRatio = cap on devicePixelRatio (Retina screens render at up to this density)
-  low:    { pixelRatio: 0.75, shadowSize: 1024, msaa: 0, bloom: false, ao: false, paintAtlas: 2048, particles: 0.4 },
-  medium: { pixelRatio: 1.0,  shadowSize: 2048, msaa: 2, bloom: true,  ao: false, paintAtlas: 2048, particles: 0.7 },
-  high:   { pixelRatio: 1.5,  shadowSize: 4096, msaa: 4, bloom: true,  ao: true,  paintAtlas: 4096, particles: 1.0 },
-  ultra:  { pixelRatio: 2.0,  shadowSize: 4096, msaa: 4, bloom: true,  ao: true,  paintAtlas: 4096, particles: 1.0 },
 };

@@ -1,0 +1,28 @@
+// INKWAVE on Cloudflare Workers: the asset layer serves dist/ (built by tools/build-dist.py, which also writes
+// dist/_headers: CSP + hardening headers). The Worker script (worker/turn.js) runs only for /api/* — it mints
+// short-lived TURN relay credentials for online play. Deploy with `npm run deploy`.
+// The target account comes from CLOUDFLARE_ACCOUNT_ID in .env (gitignored), not from this file. The TURN key lives in
+// Worker secrets: `npx wrangler@4.141.0 secret put TURN_KEY_ID` and `... secret put TURN_KEY_API_TOKEN`.
+{
+  "name": "inkwave-multiplayer",
+  "main": "worker/turn.js",
+  "compatibility_date": "2026-09-27",
+  "assets": {
+    "directory": "./dist",
+    "run_worker_first": ["/api/*"]
+  },
+  // per-IP limit on minting relay credentials (a player needs one per room joined)
+  "ratelimits": [
+    { "name": "TURN_LIMIT", "namespace_id": "1001", "simple": { "limit": 10, "period": 60 } }
+  ],
+  "workers_dev": true,
+  // one public URL: no per-version preview URLs
+  "preview_urls": false,
+  "observability": {
+   "logs": {
+     "enabled": true,
+     "invocation_logs": true,
+     "persist": true
+   }
+ },
+}

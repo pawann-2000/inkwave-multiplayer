@@ -4,12 +4,13 @@
 //   · you (arrow = facing), your three teammates (weapon badge, name, [1]–[3]; greyed with a countdown while splatted),
 //     your base ([4]) — enemies are not shown
 //   · a virtual map cursor (pointer stays locked: mouse deltas / right stick) that snaps to pins and tilts the diorama a
-//     touch toward itself; click / A on a pin, or the number keys, to Super Jump — an ink arc previews the jump
+//     touch toward itself; click / A on a pin, or the number keys, to Super Jump — an ink arc previews the jump.
+//     On a touch screen the pins themselves are the buttons: tap one to jump there
 //   · a miniature finish: tilt-shift blur bands, a soft vignette, the stage name
 // Per frame it only projects a handful of points and writes transforms / CSS vars when they change.
 import { h, clamp } from './ui-util.js';
 import { keycap, weaponIcon, richText } from './ui-icons.js';
-import { G } from '../core/ctx.js';
+import { G, view } from '../core/ctx.js';
 import * as THREE from 'three';
 
 const _v = new THREE.Vector3(), _v2 = new THREE.Vector3();
@@ -46,11 +47,18 @@ export class DioramaOverlay {
     const icon = h('span', { class: 'iw-pin__icon', html: self ? ARROW : home ? HOME_ICON : '' });
     const name = h('span', { class: 'iw-pin__name' }, self ? 'YOU' : home ? 'BASE' : '');
     const state = h('span', { class: 'iw-pin__state' });
+    const badge = h('span', { class: 'iw-pin__badge' }, icon, h('span', { class: 'iw-pin__pulse' }));
     const el = h('div', { class: 'iw-pin' + (self ? ' iw-pin--self' : '') + (home ? ' iw-pin--home' : '') },
       h('span', { class: 'iw-pin__ground' }), h('span', { class: 'iw-pin__stem' }),
-      h('span', { class: 'iw-pin__badge' }, icon, h('span', { class: 'iw-pin__pulse' })),
+      badge,
       self ? null : h('span', { class: 'iw-pin__key', html: keycap(String(i + 1)) }),
       name, state);
+    if (!self) badge.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse' || this.k < 0.7) return;   // the mouse steers the locked cursor instead
+      e.preventDefault();
+      this.hover = i;
+      this._jump(i, G.match?.local);
+    });
     return { el, icon, name, state, x: 0, y: 0, vis: false, key: '', weapon: null, target: null, ok: false };
   }
 
@@ -68,7 +76,7 @@ export class DioramaOverlay {
     const a = smooth(0.3, 0.95, k);
     if (Math.abs(a - (this._last.a ?? -1)) > 0.004) { this._last.a = a; this.el.style.opacity = a.toFixed(3); this.el.style.setProperty('--pinK', smooth(0.62, 1, k).toFixed(3)); }
     const me = G.match?.local;
-    const cam = G.camera, W = innerWidth, H = innerHeight;
+    const cam = G.camera, W = view.w, H = view.h;
     if (!me || !cam) return;
     const allies = (G.actors || []).filter((o) => o.team === me.team && o !== me);
     const col = G.teamHex?.[me.team] || '#ff8a14';
@@ -185,9 +193,10 @@ export class DioramaOverlay {
     const m = G.game?.mapDef;
     this.title.textContent = (m?.name || 'Stage').toUpperCase();
     this.when.textContent = G.game?.time === 'dusk' ? 'DUSK' : 'DAY';
-    const pad = G.input?.lastDevice === 'pad';
-    this.foot.innerHTML = pad
+    const dev = G.input?.lastDevice;
+    this.foot.innerHTML = dev === 'pad'
       ? richText('Right stick to point · A or D-pad to Super Jump · release VIEW to close')
+      : dev === 'touch' ? richText('Tap a teammate or your base to Super Jump · MAP to close')
       : `${keycap('1')}${keycap('2')}${keycap('3')} <span>Super Jump to a teammate</span> ${keycap('4')} <span>Base</span> <em>·</em> <span>Point + click a pin</span> <em>·</em> <span>release</span> ${keycap('TAB')}`;
   }
 }

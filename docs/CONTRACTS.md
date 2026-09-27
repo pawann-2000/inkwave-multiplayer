@@ -128,7 +128,7 @@ menus.showResults(ResultsData)   // then show('results')
 menus.update(dt)
 menus.handleKey(e) / gamepad nav: menus.nav('up'|'down'|'left'|'right'|'accept'|'back')
 ```
-`api` (provided by core): `getSettings() setSettings(partial) getProfile() setProfileName(n) getLoadout() setLoadout({weapon})
+`api` (provided by core): `getSettings() setSettings(partial) gfxStatus() getProfile() setProfileName(n) getLoadout() setLoadout({weapon})
 weapons (WEAPONS) weaponOrder specials (SPECIALS) sub (SUB.bomb) maps (MAPS) difficulties (DIFFICULTY)
 startMatch({ mapId, difficulty, duration }) resumeMatch() quitMatch() rematch() toMainMenu() onScreenChange(screen) playSound(name) version`.
 
@@ -175,7 +175,7 @@ state change, hover/press states with sound. Must feel like a shipped console ga
 
 ```js
 import { FX } from './fx.js';
-const fx = new FX(scene, { quality });
+const fx = new FX(scene, { quality });   // particle multiplier (gfx.js profile.particles); fx.setQuality(q) live
 fx.setCollider((from, to) => hit|null)   // hit = { point, normal } ; droplets stop/splat on geometry
 fx.onDropletLand = (point, normal, color, size) => {}   // engine paints tiny splats for droplets with paint:true
 fx.burst(pos, normal, color, { count=12, speed=4, size=0.1, spread=0.9, gravity=1, paint=false })
@@ -202,6 +202,8 @@ env.envMap              // PMREM texture → set as scene.environment
 env.fogColor
 env.update(dt, camera)  // animate water/clouds/gulls
 env.setTheme(theme)
+env.setShadows(size, soft)          // graphics settings: shadow map size, 9-tap soft filter or one tap (live)
+env.setReflections(scale, actors)   // marina planar reflection size (0 = off) and whether squid kids / FX reflect
 ```
 Contents: gradient sky dome with stylized clouds + sun, an animated stylized ocean surrounding the arena (the arena sits
 on a harbor deck; arena floor y = 0, water surface at y = -1.6; touching the water = splatted), distant skyline/cranes/lighthouse/

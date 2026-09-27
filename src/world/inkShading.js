@@ -104,6 +104,7 @@ export const INK_COLOR = /* glsl */`
     vec4 pnt = paintAt(vPaintUv);
     float near = 1.0 - smoothstep(0.9, 2.4, texFoot);
     vec4 gX = vec4(0.0), gY = vec4(0.0);                   // per-texel gradients of all four channels
+#ifndef LEVEL_LITE
     vec4 l2 = textureLod(uPaint, vPaintUv, 2.0);
     float seam2 = l2.r / max(l2.a, 1e-3);
     if (near > 0.0 && l2.a > 0.002 && (l2.a < 0.998 || pnt.a < 0.998 || (seam2 > 0.006 && seam2 < 0.994))) {
@@ -112,6 +113,7 @@ export const INK_COLOR = /* glsl */`
       pnt = mix(pnt, cub, near);
       gX = cX * near; gY = cY * near;
     }
+#endif
     gInkNear = near;
     float amt = pnt.a;
     float fw = fwidth(amt);
@@ -219,6 +221,7 @@ export const INK_GEL = /* glsl */`
 
 // After the swim wakes (T, Bt = the face's world tangent frame): expanding ripples in the ink surface.
 export const INK_SLOPE = /* glsl */`
+#ifndef LEVEL_LITE
   if (gInk > 0.01) {
     // ripples: a wave packet runs out from every impact / footstep / dive, thinning as it spreads; the crests catch
     // the light (glossier). Height field → analytic gradient in the face plane.
@@ -250,7 +253,8 @@ export const INK_SLOPE = /* glsl */`
     float rFar = 1.0 - smoothstep(0.05, 0.18, length(fwidth(vWPos)));
     slope += vec2(dot(rS, T), dot(rS, Bt)) * gInk * rFar;
     gWake = max(gWake, clamp(rG * 0.5, 0.0, 1.0) * gInk * rFar);
-  }`;
+  }
+#endif`;
 
 // ---------------------------------------------------------------------------------------------------- lighting
 // a little self-light keeps ink loud in shadow and at dusk (subsurface-ish glow, stronger in the thick body)

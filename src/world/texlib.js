@@ -1212,6 +1212,9 @@ TexlibSample texlibSample(sampler2DArray tA, sampler2DArray tN, sampler2DArray t
   else if (ly > lx * 144.0) gx = lx > 1e-20 ? gx * sqrt(ly / (lx * 144.0)) : vec2(gy.y, -gy.x) / 12.0;
   TexlibSample r;
   vec3 n; float nl;
+#ifdef TEXLIB_SINGLE_TAP
+  if (mode == TEXLIB_HEX) mode = TEXLIB_PLAIN;   // cheap variant: one tap, the tiling shows
+#endif
   if (mode == TEXLIB_HEX) {
     vec3 w; ivec2 v1, v2, v3;
     texlib_triGrid(uv * TEXLIB_HEX_SCALE, w, v1, v2, v3);
@@ -1347,57 +1350,63 @@ export async function createTextureLibrary(renderer, { size = 512 } = {}) {
   }
   out.textures[0].name = 'texlib.albedo'; out.textures[1].name = 'texlib.normal'; out.textures[2].name = 'texlib.orm';
 
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute([-1, -1, 0, 3, -1, 0, -1, 3, 0], 3));
-  const cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-  const raw = (fs, uniforms) => new THREE.RawShaderMaterial({
-    glslVersion: THREE.GLSL3, vertexShader: GEN_VS, fragmentShader: fs, uniforms, depthTest: false, depthWrite: false,
-  });
-  // one uber-program per material group (the original layers / the marina set): one driver compile + pipeline per
-  // group instead of one per layer, and the two compile in parallel (cold start matters) while each stays small
-  const uniforms = {
-    uRes: { value: new THREE.Vector2(size, size) }, uScale: { value: 1 }, uMat: { value: 0 }, uOne: { value: 1 },
-    uHRange: { value: new THREE.Vector2() }, uAO: { value: 0.5 },
+  // Render every layer into `out` (also after a WebGL context loss: the target and its textures keep their identity,
+  // so the materials sampling them need no change — only the pixels are gone).
+  const bake = async () => {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute([-1, -1, 0, 3, -1, 0, -1, 3, 0], 3));
+    const cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    const raw = (fs, uniforms) => new THREE.RawShaderMaterial({
+      glslVersion: THREE.GLSL3, vertexShader: GEN_VS, fragmentShader: fs, uniforms, depthTest: false, depthWrite: false,
+    });
+    // one uber-program per material group (the original layers / the marina set): one driver compile + pipeline per
+    // group instead of one per layer, and the two compile in parallel (cold start matters) while each stays small
+    const uniforms = {
+      uRes: { value: new THREE.Vector2(size, size) }, uScale: { value: 1 }, uMat: { value: 0 }, uOne: { value: 1 },
+      uHRange: { value: new THREE.Vector2() }, uAO: { value: 0.5 },
+    };
+    const groups = [0, 1, 2].map((g) => MATERIALS.map((m, i) => [m, i]).filter(([m]) => (m.group || 0) === g)).filter((l) => l.length);
+    const progs = groups.map((list) => {
+      const fns = list.map(([m, i]) => `void prep${i}(${PREP_SIG}) {\n  ${m.prep}\n}\nvoid surf${i}(${SURF_SIG}) {${m.surf}\n}`).join('\n');
+      const sw = (fn, args) => list.map(([, i], k) => `${k ? 'else ' : ''}if (uMat == ${i}) ${fn}${i}(${args});`).join('\n  ');
+      return raw(GEN_COMMON + fns + GEN_MAIN.replace('PREP_SWITCH', sw('prep', 'uv, P, f, w')).replace('SURF_SWITCH', sw('surf', 'uv, P, n, c, s')), uniforms);
+    });
+    const scene = new THREE.Scene();
+    const quads = progs.map((p) => { const q = new THREE.Mesh(geo, p); q.frustumCulled = false; scene.add(q); return q; });
+    const groupOf = new Map(groups.flatMap((list, k) => list.map(([, i]) => [i, k])));
+    await renderer.compileAsync(scene, cam);   // async (and parallel) where KHR_parallel_shader_compile exists
+    const tCompiled = performance.now();
+
+    const prevRT = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+    const prevXR = renderer.xr.enabled;
+    renderer.autoClear = false;
+    renderer.xr.enabled = false;
+    renderer.initRenderTarget(out);
+    for (const t of out.textures) t.generateMipmaps = false;   // build the mip chain once, after the last layer
+
+    for (let i = 0; i < L; i++) {
+      const m = MATERIALS[i];
+      quads.forEach((q, k) => { q.visible = k === groupOf.get(i); });
+      uniforms.uMat.value = i;
+      uniforms.uScale.value = m.scale;
+      uniforms.uHRange.value.set(m.hr[0], m.hr[1]);
+      uniforms.uAO.value = m.ao;
+      if (i === L - 1) for (const t of out.textures) t.generateMipmaps = true;
+      renderer.setRenderTarget(out, i);
+      renderer.render(scene, cam);
+      renderer.getContext().flush();   // one GPU batch per layer: a single long batch can trip weak iGPUs' watchdogs
+    }
+    for (const t of out.textures) t.generateMipmaps = true;
+
+    renderer.setRenderTarget(prevRT);
+    renderer.autoClear = prevAutoClear;
+    renderer.xr.enabled = prevXR;
+    progs.forEach((p) => p.dispose());
+    geo.dispose();
+    return tCompiled;
   };
-  const groups = [0, 1, 2].map((g) => MATERIALS.map((m, i) => [m, i]).filter(([m]) => (m.group || 0) === g)).filter((l) => l.length);
-  const progs = groups.map((list) => {
-    const fns = list.map(([m, i]) => `void prep${i}(${PREP_SIG}) {\n  ${m.prep}\n}\nvoid surf${i}(${SURF_SIG}) {${m.surf}\n}`).join('\n');
-    const sw = (fn, args) => list.map(([, i], k) => `${k ? 'else ' : ''}if (uMat == ${i}) ${fn}${i}(${args});`).join('\n  ');
-    return raw(GEN_COMMON + fns + GEN_MAIN.replace('PREP_SWITCH', sw('prep', 'uv, P, f, w')).replace('SURF_SWITCH', sw('surf', 'uv, P, n, c, s')), uniforms);
-  });
-  const scene = new THREE.Scene();
-  const quads = progs.map((p) => { const q = new THREE.Mesh(geo, p); q.frustumCulled = false; scene.add(q); return q; });
-  const groupOf = new Map(groups.flatMap((list, k) => list.map(([, i]) => [i, k])));
-  await renderer.compileAsync(scene, cam);   // async (and parallel) where KHR_parallel_shader_compile exists
-  const tCompiled = performance.now();
-
-  const prevRT = renderer.getRenderTarget();
-  const prevAutoClear = renderer.autoClear;
-  const prevXR = renderer.xr.enabled;
-  renderer.autoClear = false;
-  renderer.xr.enabled = false;
-  renderer.initRenderTarget(out);
-  for (const t of out.textures) t.generateMipmaps = false;   // build the mip chain once, after the last layer
-
-  for (let i = 0; i < L; i++) {
-    const m = MATERIALS[i];
-    quads.forEach((q, k) => { q.visible = k === groupOf.get(i); });
-    uniforms.uMat.value = i;
-    uniforms.uScale.value = m.scale;
-    uniforms.uHRange.value.set(m.hr[0], m.hr[1]);
-    uniforms.uAO.value = m.ao;
-    if (i === L - 1) for (const t of out.textures) t.generateMipmaps = true;
-    renderer.setRenderTarget(out, i);
-    renderer.render(scene, cam);
-  }
-  // wait for the GPU so the reported time is honest (one-pixel readback)
-  renderer.readRenderTargetPixels(out, 0, 0, 1, 1, new Uint8Array(4), undefined, 2);
-
-  renderer.setRenderTarget(prevRT);
-  renderer.autoClear = prevAutoClear;
-  renderer.xr.enabled = prevXR;
-  progs.forEach((p) => p.dispose());
-  geo.dispose();
+  const tCompiled = await bake();
 
   const layers = {}, meta = {};
   MATERIALS.forEach((m, i) => {
@@ -1413,7 +1422,8 @@ export async function createTextureLibrary(renderer, { size = 512 } = {}) {
     meta,
     names: MATERIALS.map((m) => m.name),
     size,
-    stats: { ms: +(t1 - t0).toFixed(1), compileMs: +(tCompiled - t0).toFixed(1), size },
+    stats: { ms: +(t1 - t0).toFixed(1), compileMs: +(tCompiled - t0).toFixed(1), size },   // CPU time (the GPU bake runs on)
+    rebake: () => bake(),
     dispose() { out.dispose(); },
   };
 }

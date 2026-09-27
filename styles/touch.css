@@ -1,0 +1,97 @@
+/* Touch screens: the on-screen controls (src/ui/touch.js) and what changes while touch is the active device
+   (body.is-touch, menus .iw-ui.is-touch). --tb: one thumb button — never under the 44 px touch-target minimum,
+   never over a comfortable 78 px. */
+.iw-touch {
+  position: fixed; inset: 0; z-index: 15; display: none; pointer-events: none;
+  --tb: clamp(44px, 12.5vmin, 78px); --ta: #ff8a14; --k: #15121c;
+  -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+}
+.iw-touch.is-on { display: block; }
+.iw-touch > * { pointer-events: auto; touch-action: none; }
+.iw-tz { position: absolute; }
+.iw-tz--stick { left: 0; bottom: 0; width: 45%; height: 65%; }
+.iw-tz--look { right: 0; top: 0; width: 55%; height: 100%; }
+
+.iw-stick {
+  position: absolute; left: 0; top: 0; pointer-events: none;
+  width: calc(var(--tb) * 2.3); height: calc(var(--tb) * 2.3); margin: calc(var(--tb) * -1.15) 0 0 calc(var(--tb) * -1.15);
+  border-radius: 50%; background: rgba(21, 18, 28, .28); box-shadow: inset 0 0 0 3px rgba(255, 255, 255, .5);
+  opacity: 0; transition: opacity .15s;
+}
+.iw-stick.is-on { opacity: 1; }
+.iw-stick__knob {
+  position: absolute; left: 50%; top: 50%;
+  width: calc(var(--tb) * .95); height: calc(var(--tb) * .95); margin: calc(var(--tb) * -.475) 0 0 calc(var(--tb) * -.475);
+  border-radius: 50%; background: var(--ta); box-shadow: 0 0 0 3px var(--k), 0 4px 0 rgba(0, 0, 0, .28);
+}
+
+.iw-tb {
+  position: absolute; width: var(--tb); height: var(--tb); border-radius: 50%;
+  display: grid; place-items: center; color: var(--k);
+  background: rgba(255, 255, 255, .84); box-shadow: 0 0 0 3px var(--k), 0 4px 0 rgba(0, 0, 0, .3);
+  transition: transform .08s ease-out, background .12s, opacity .2s;
+}
+.iw-tb__ico { width: 58%; height: 58%; color: var(--ta); pointer-events: none; }
+.iw-tb__ico svg { display: block; width: 100%; height: 100%; }
+.iw-tb b {
+  position: absolute; bottom: calc(var(--tb) * -.3); pointer-events: none;
+  font: 900 calc(var(--tb) * .19) / 1 'Rubik', sans-serif; letter-spacing: .06em; color: #fff; white-space: nowrap;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, .85), 0 0 3px rgba(0, 0, 0, .6);
+}
+.iw-tb.is-down { transform: scale(.9); background: var(--ta); }
+.iw-tb.is-down .iw-tb__ico { color: #fff; }
+
+/* right thumb: FIRE big and lowest, the rest in an arc around it */
+.iw-tb--fire { width: calc(var(--tb) * 1.6); height: calc(var(--tb) * 1.6); right: 4%; bottom: 13%; }
+.iw-tb--jump { right: calc(4% + var(--tb) * 1.95); bottom: 5%; }
+.iw-tb--swim { width: calc(var(--tb) * 1.12); height: calc(var(--tb) * 1.12); right: calc(4% + var(--tb) * .24); bottom: calc(13% + var(--tb) * 2.05); }
+.iw-tb--sub { right: calc(4% + var(--tb) * 1.85); bottom: calc(13% + var(--tb) * 1.4); }
+.iw-tb--special { right: calc(4% + var(--tb) * 1.65); bottom: calc(13% + var(--tb) * 2.75); opacity: .55; }
+.iw-tb--special.is-ready { opacity: 1; background: var(--ta); animation: iw-tb-pulse 1.1s ease-in-out infinite; }
+.iw-tb--special.is-ready .iw-tb__ico { color: #fff; }
+@keyframes iw-tb-pulse { 50% { box-shadow: 0 0 0 3px var(--k), 0 0 0 9px rgba(255, 255, 255, .35), 0 4px 0 rgba(0, 0, 0, .3); } }
+
+/* top-left: pause + map; the corner minimap sits under them (src/ui/hud.js _updMap mirrors this size and offset) */
+.iw-tb--pause, .iw-tb--map { --ts: clamp(40px, 10vmin, 60px); width: var(--ts); height: var(--ts); top: 10px; }
+.iw-tb--pause { left: 10px; }
+.iw-tb--map { left: calc(10px + var(--ts) + 10px); }
+.iw-tb--pause b, .iw-tb--map b { display: none; }
+.iw-tb--pause .iw-tb__ico { color: var(--k); }
+
+/* splatted: only the map (plan a super jump) and pause; map open: the fight controls step aside for the pins */
+.iw-touch.is-dead .iw-tz, .iw-touch.is-dead .iw-stick, .iw-touch.is-dead .iw-tb:not(.iw-tb--map):not(.iw-tb--pause),
+.iw-touch.is-map .iw-tz, .iw-touch.is-map .iw-stick, .iw-touch.is-map .iw-tb:not(.iw-tb--map):not(.iw-tb--pause) { display: none; }
+
+/* HUD while touch is active: map pins are the super-jump buttons (thumb-sized, with a wider invisible hit area);
+   no keyboard glyphs; the stage-map title clears the pause / map buttons */
+body.is-touch .iw-pin { --s: calc(var(--u) * 4); }
+body.is-touch .iw-pin--home { --s: calc(var(--u) * 3.5); }
+body.is-touch .iw-pin--self { --s: calc(var(--u) * 4.2); }
+body.is-touch .iw-dio.is-on .iw-pin:not(.iw-pin--self) .iw-pin__badge { pointer-events: auto; }
+body.is-touch .iw-pin__badge::after { content: ''; position: absolute; inset: -55%; border-radius: 50%; }
+body.is-touch .iw-pin__key, body.is-touch .iw-map__label, body.is-touch .iw-sp__ready span:last-child { display: none; }
+body.is-touch .iw-dio__head { top: calc(10px + clamp(40px, 10vmin, 60px) + 14px); }
+
+/* menus while touch is active: everything is tapped directly, so no key / button prompts */
+.iw-ui.is-touch .iw-prompts, .iw-ui.is-touch .iw-hint .iw-kbm, .iw-ui.is-touch .iw-tabs__hint, .iw-ui.is-touch .iw-lbtn__key { display: none !important; }
+
+/* controls reference: the on-screen touch controls by name */
+.iw-tkey {
+  display: inline-flex; align-items: center; height: 1.9em; padding: 0 .75em; border-radius: 999px; background: #fff; color: var(--k);
+  font: 900 .74em / 1 'Rubik', sans-serif; letter-spacing: .06em; white-space: nowrap; box-shadow: 0 0 0 2px var(--k), 0 .16em 0 2px var(--k);
+}
+.iw-ctl__keys em { margin-left: .6em; font: 700 var(--fs-xs) / 1 'Rubik', sans-serif; font-style: normal; opacity: .75; }
+.iw-pv-finger { display: block; width: 2.4em; height: 2.4em; color: #fff; filter: drop-shadow(0 2px 0 var(--k)); }
+.iw-pv-finger svg { display: block; width: 100%; height: 100%; }
+
+/* phones held upright: the game is landscape-only (index.html #rotate) */
+#rotate { display: none; }
+@media (pointer: coarse) and (orientation: portrait) and (max-width: 760px) {
+  #rotate {
+    display: grid; place-items: center; align-content: center; gap: 18px; position: fixed; inset: 0; z-index: 100; padding: 24px;
+    background: #0d1020; color: #fff; text-align: center; font: 800 20px / 1.3 'Rubik', system-ui, sans-serif;
+  }
+  #rotate svg { width: 96px; height: 96px; animation: iw-rotate-hint 2.4s ease-in-out infinite; }
+  #rotate small { font-weight: 600; font-size: 15px; opacity: .75; }
+}
+@keyframes iw-rotate-hint { 0%, 20% { rotate: 0deg; } 45%, 75% { rotate: -90deg; } 100% { rotate: 0deg; } }

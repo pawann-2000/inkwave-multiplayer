@@ -1,7 +1,10 @@
-// Keyboard + mouse (pointer lock) + standard gamepad. Produces a unified per-frame snapshot.
+// Keyboard + mouse (pointer lock) + standard gamepad + touch. Produces a unified per-frame snapshot.
 // Gamepad: radial dead zone + response curve sticks (padStick) and subtle dual-rumble (rumble), scaled by
 // settings.rumble (0..1, default 1) and only while the pad is the active device.
 import { G } from './ctx.js';
+
+// phones / tablets: the primary pointer is a finger (no hover). Hybrids (touch laptops) start as keyboard + mouse.
+export const primaryTouch = () => typeof matchMedia === 'function' && matchMedia('(hover: none) and (pointer: coarse)').matches;
 
 // keys whose browser default (focus moves, page scroll) must never fire while the game has the mouse
 const GAME_KEYS = new Set(['Tab', 'Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Slash', 'Quote']);
@@ -17,7 +20,11 @@ export class Input {
     this.pad = null;
     this.padPrev = [];
     this.padPressed = new Set();
-    this.lastDevice = 'kbm';
+    this.lastDevice = primaryTouch() ? 'touch' : 'kbm';   // 'kbm' | 'pad' | 'touch'
+    this.onDevice = null;             // (device) => void, when lastDevice changes
+    // touch (src/ui/touch.js writes it): analog move (x right, y forward, |v| ≤ 1), look drag in CSS px accumulated
+    // over the frame, held buttons, and the map toggle
+    this.touch = { mx: 0, my: 0, dx: 0, dy: 0, fire: false, jump: false, squid: false, sub: false, special: false, map: false };
     this.onKey = null;              // (e) => bool consumed  (menus)
     window.addEventListener('keydown', (e) => {
       // the menus call preventDefault themselves when needed (text fields must still receive keystrokes)
@@ -28,7 +35,7 @@ export class Input {
         if (this.onKey) this.onKey(e, true);
         return;
       }
-      this.lastDevice = 'kbm';
+      this.setDevice('kbm');
       if (this.onKey && this.onKey(e, false)) return;
       this.keys.add(e.code);
       this.pressed.add(e.code);
@@ -36,11 +43,11 @@ export class Input {
       if (e.code === 'Tab') e.preventDefault();
     });
     window.addEventListener('keyup', (e) => { this.keys.delete(e.code); });
-    window.addEventListener('blur', () => { this.keys.clear(); this.mouse.left = this.mouse.right = false; });
+    window.addEventListener('blur', () => { this.keys.clear(); this.mouse.left = this.mouse.right = false; this.releaseTouch(); });
     window.addEventListener('mousemove', (e) => {
       if (!this.locked) return;
       this.mouse.dx += e.movementX; this.mouse.dy += e.movementY;
-      this.lastDevice = 'kbm';
+      this.setDevice('kbm');
     });
     window.addEventListener('mousedown', (e) => {
       if (!this.locked) return;
@@ -52,14 +59,31 @@ export class Input {
       if (e.button === 2) this.mouse.right = false;
     });
     window.addEventListener('contextmenu', (e) => e.preventDefault());
+    // a finger anywhere makes touch the active device; a real mouse button hands it back
+    window.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'touch') this.setDevice('touch');
+      else if (e.pointerType === 'mouse') this.setDevice('kbm');
+    }, { capture: true, passive: true });
     document.addEventListener('pointerlockchange', () => {
       this.locked = document.pointerLockElement === this.canvas;
       if (!this.locked) { this.mouse.left = this.mouse.right = false; this.onUnlock?.(); }
     });
   }
 
+  setDevice(d) {
+    if (d === this.lastDevice) return;
+    this.lastDevice = d;
+    if (d !== 'touch') this.releaseTouch();
+    this.onDevice?.(d);
+  }
+  releaseTouch() {
+    const t = this.touch;
+    t.mx = t.my = t.dx = t.dy = 0;
+    t.fire = t.jump = t.squid = t.sub = t.special = t.map = false;
+  }
+
   requestLock() {
-    if (this.locked) return;
+    if (this.locked || this.lastDevice === 'touch') return;   // fingers aim with the on-screen controls
     try {
       const p = this.canvas.requestPointerLock({ unadjustedMovement: true });
       // some platforms reject unadjustedMovement: fall back to a plain request
@@ -81,11 +105,11 @@ export class Input {
     if (!pad) return;
     pad.buttons.forEach((b, i) => {
       const was = this.padPrev[i] || false;
-      if (b.pressed && !was) { this.padPressed.add(i); this.lastDevice = 'pad'; }
+      if (b.pressed && !was) { this.padPressed.add(i); this.setDevice('pad'); }
       this.padPrev[i] = b.pressed;
     });
     const ax = pad.axes;
-    if (Math.abs(ax[0]) > 0.3 || Math.abs(ax[1]) > 0.3 || Math.abs(ax[2]) > 0.3 || Math.abs(ax[3]) > 0.3) this.lastDevice = 'pad';
+    if (Math.abs(ax[0]) > 0.3 || Math.abs(ax[1]) > 0.3 || Math.abs(ax[2]) > 0.3 || Math.abs(ax[3]) > 0.3) this.setDevice('pad');
   }
   padButton(i) { return !!(this.pad && this.pad.buttons[i] && this.pad.buttons[i].pressed); }
   padValue(i) { return this.pad && this.pad.buttons[i] ? this.pad.buttons[i].value : 0; }
@@ -134,5 +158,6 @@ export class Input {
     this.pressed.clear();
     this.mouse.dx = 0; this.mouse.dy = 0;
     this.mouse.leftPressed = false; this.mouse.rightPressed = false;
+    this.touch.dx = 0; this.touch.dy = 0;
   }
 }

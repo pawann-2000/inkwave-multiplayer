@@ -19,7 +19,8 @@
 // 'head'|'bust'|'body', size, weapon }, cb(canvas)) — queued studio portraits for menu tiles (one per frame).
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import { G, damp, lerp, rng } from '../core/ctx.js';
+import { G, damp, lerp, rng, view } from '../core/ctx.js';
+import { compileAsyncFor } from '../core/renderer.js';
 
 // ================================================================================================ helpers
 const TAU = Math.PI * 2;
@@ -1086,7 +1087,8 @@ export class Showcase {
   // ---------------------------------------------------------------------------------------------- update
   update(dt) {
     dt = Math.min(dt || 0, 0.1);
-    if (!this._warmState && G.env) this._warmup();
+    // after boot: compiling during the boot warm-up frames would queue behind (and slow) the game's own shaders
+    if (!this._warmState && G.env && G.game?.bootMs) this._warmup();
     let mode = this.mode;
     if (!mode && this._out > 0) {
       this._out -= dt;
@@ -1683,8 +1685,9 @@ export class Showcase {
         if (!PEDESTAL.has(this.mode)) this.stageL.group.visible = stageWas && PEDESTAL.has(this.mode);
         this._warmState = 'done';
       };
-      const p1 = r.compileAsync ? r.compileAsync(this.scene, this.camera) : Promise.resolve(r.compile(this.scene, this.camera));
-      const p2 = r.compileAsync ? r.compileAsync(this._presScene, this.compCam) : Promise.resolve(r.compile(this._presScene, this.compCam));
+      // against the targets they really draw into (HDR pedestal / portrait target, then the 8-bit resolve)
+      const p1 = compileAsyncFor(r, this.scene, this.camera, this._prt);
+      const p2 = compileAsyncFor(r, this._presScene, this.compCam, this._prt8);
       Promise.all([p1, p2]).then(done, (e) => { console.warn('[showcase] warm-up', e); done(); });
     } catch (e) { console.warn('[showcase] warm-up', e); this._warmState = 'done'; }
   }
@@ -1701,7 +1704,7 @@ export class Showcase {
       if (this._rt) { this._rt.dispose(); this._rt = null; }
       return b;
     }
-    if (!this._rt) this._rt = new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, samples: (G.post?.q?.msaa ?? 4) > 0 ? 4 : 0 });
+    if (!this._rt) this._rt = new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, samples: (G.post?.p?.msaa ?? 4) > 0 ? 4 : 0 });
     else if (this._rt.width !== w || this._rt.height !== h) this._rt.setSize(w, h);
     return this._rt;
   }
@@ -1710,7 +1713,7 @@ export class Showcase {
     if (this._pq.length) this._portraitStep();
     const mode = this.mode || (this._out > 0 ? this._lastMode : null);
     if (!mode || !this.chars.length) return;
-    const r = this.r, W = innerWidth, H = innerHeight;
+    const r = this.r, W = view.w, H = view.h;
     this._fdt = 1 / 60;
     if (PEDESTAL.has(mode)) this._cameraPedestal(mode, W, H); else this._cameraResults(W, H);
     this.scene.environment = G.env?.envMap || null;

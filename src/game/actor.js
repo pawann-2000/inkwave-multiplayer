@@ -2,6 +2,11 @@
 // Character visual. Controllers (player input / bot AI) only write `intent` + aim; everything else lives here so
 // bots and the player play by exactly the same rules.
 //
+// Online (src/net/netmatch.js): `owned` actors are simulated on this browser (the local player; on the host, bots
+// too). The rest are remote: netmatch writes each one's interpolated snapshot into it and update() only animates it
+// (_remoteUpdate). Gameplay authority stays with the owner — only an owned actor loses health, dies, respawns or
+// paints turf here; remote ones do those things when their owner says so. Offline every actor is owned.
+//
 // Movement = a kinematic character controller:
 //  · feet: flat-footprint ground probe (physics.groundProbe) — exact on slopes, ledges hold until the whole
 //    footprint is off, curbs ≤ stepUp are walked onto, ground is stuck to within stepDown (ramps, steps down)
@@ -31,6 +36,8 @@ export function rumble(actor, strong, weak, ms) {
 export class Actor {
   constructor({ team, name, weapon = 'shooter', isLocal = false, isBot = false, style = { hair: 0, skin: 0 }, slot = 0, CharacterClass }) {
     this.team = team; this.name = name; this.isLocal = isLocal; this.isBot = isBot; this.slot = slot;
+    this.owned = true;     // simulated on this browser (online: see the header); offline always true
+    this.nid = team * 4 + slot;   // network id (roster slot)
     this.weaponId = weapon;
     this.weapon = WEAPONS[weapon];
     this.pos = new THREE.Vector3();
@@ -156,7 +163,7 @@ export class Actor {
 
   // ------------------------------------------------------------------ damage
   damage(amount, attacker, source = 'weapon') {
-    if (!this.alive || amount <= 0) return false;
+    if (!this.alive || amount <= 0 || !this.owned) return false;   // only the owner's browser changes health
     if (this.invuln > 0) return false;
     if (this.specialActive && this.specialActive.armor) amount *= 0.25;
     this.hp -= amount;
@@ -197,10 +204,15 @@ export class Actor {
     G.fx?.splatted(_v, col);
     if (attacker) {
       attacker.stats.splats++;
-      // burst into the attacker's ink
-      _v.copy(this.pos); _v.y += 0.35;
-      attacker.addTurf(G.paint.splat(_v, 1.7, attacker.team, { seed: Math.random() }));
+      // burst into the attacker's ink — painted by whoever simulates the victim; online the splat reaches everyone
+      // else credited to the attacker, whose owner adds the turf
+      if (this.owned) {
+        _v.copy(this.pos); _v.y += 0.35;
+        const area = G.paint.splat(_v, 1.7, attacker.team, { seed: Math.random(), credit: attacker });
+        if (attacker.owned) attacker.addTurf(area);
+      }
     }
+    if (!this.owned) this.stopRemoteLoops();
     this.character.setVisible(false);
     if (this.isLocal) rumble(this, 0.8, 0.6, 260);
     emit('splatted', { victim: this, attacker, cause });
@@ -209,6 +221,7 @@ export class Actor {
   // ------------------------------------------------------------------ update
   update(dt) {
     this.anim.time = G.time;
+    if (!this.owned) { this._remoteUpdate(dt); return; }
     // safety net: a non-finite position/velocity must never poison the camera or physics
     if (!Number.isFinite(this.pos.x + this.pos.y + this.pos.z + this.vel.x + this.vel.y + this.vel.z + this.yaw + this.smoothY)) {
       console.warn('[inkwave] non-finite actor state recovered', this.name);
@@ -342,6 +355,91 @@ export class Actor {
     const c = G.rig?.gameCam || G.camera; if (!c) return false;
     return c.position.distanceToSquared(this.pos) < 30 * 30;
   }
+
+  // ------------------------------------------------------------------ remote (online, simulated by another peer)
+  // netmatch.js has already written this frame's interpolated snapshot (pos, vel, yaw, aim, form, ink, hp, weapon
+  // state …). Only the presentation runs here: the same animation state a local actor builds, plus the cues its
+  // owner's physics would have produced (landing / jump / form-change sounds and events, weapon loops).
+  _remoteUpdate(dt) {
+    if (!this.alive) { this.respawnTimer = Math.max(0, this.respawnTimer - dt); return; }   // (HUD / pause roster countdown)
+    this.invuln = Math.max(0, this.invuln - dt);
+    this.lastDamage += dt; this.lastFire += dt; this.kidT += dt;
+    const cp = Math.cos(this.aimPitch);
+    this.aimDir.set(Math.sin(this.aimYaw) * cp, Math.sin(this.aimPitch), Math.cos(this.aimYaw) * cp);
+    // the owner's exact aim point isn't sent: the eye ray 20 m out (charger laser sight, muzzle aim)
+    this.aimPoint.copy(this.pos).addScaledVector(this.aimDir, 20); this.aimPoint.y += 1.3;
+    this._remoteCues();
+    this._finishFrame(dt);
+  }
+
+  _remoteCues() {
+    const near = this.isLocal || this._nearCamera();
+    const r = this._rc || (this._rc = { form: this.form, grounded: this.grounded, vy: 0, sub: false, climb: this.climbing });
+    if (this.form !== r.form) {
+      const squid = this.form === 'squid';
+      if (near) G.audio?.play(squid ? 'squid_in' : 'squid_out', { pos: this.pos, volume: 0.5 });
+      if (squid && this.groundTeam === 1) G.fx?.burst(_v.copy(this.pos).setY(this.pos.y + 0.1), _v2.set(0, 1, 0), this.color, { count: 8, speed: 2.5, size: 0.07 });
+      r.form = this.form;
+    }
+    if (!this.superJumpState) {
+      if (this.grounded && !r.grounded && r.vy < -3) {
+        const speed = -r.vy, swim = this.form === 'squid' && this.groundTeam === 1;
+        if (near && !this.specialActive) G.audio?.play(swim ? 'swim_splash' : 'land', { pos: this.pos, volume: clamp(speed / 14, 0.25, 0.9) });
+        emit('actor:land', { actor: this, speed, surface: this.groundTeam, pos: this.pos.clone() });
+      } else if (!this.grounded && r.grounded && this.vel.y > 4) {
+        if (near) G.audio?.play(r.sub ? 'swim_splash' : 'jump', { pos: this.pos, volume: 0.6 });
+        if (r.sub) G.fx?.burst(_v.copy(this.pos), _v2.set(0, 1, 0), this.color, { count: 10, speed: 3.5, size: 0.08 });
+        emit('actor:jump', { actor: this, surface: this.groundTeam, swim: r.sub });
+      }
+    }
+    if (this.climbing !== r.climb) { r.climb = this.climbing; emit('actor:climb', { actor: this, on: this.climbing }); }
+    r.grounded = this.grounded; r.vy = this.vel.y; r.sub = this.submerged;
+    this._remoteLoops(near);
+  }
+
+  // continuous weapon sounds a local WeaponRunner would run (roller drum, charger whine, splatling motor)
+  _remoteLoops(near) {
+    const wr = this.weaponRunner, w = this.weapon, L = this._rl || (this._rl = {});
+    const set = (key, name, on, volume, pitch) => {
+      on = on && near;
+      if (on && !L[key]) L[key] = G.audio?.loop?.(name, { pos: this.pos, volume, pitch }) || null;
+      else if (!on && L[key]) { L[key].stop(0.1); L[key] = null; }
+      if (L[key]) L[key].set({ pos: this.pos, volume, pitch });
+    };
+    const k = w.kind === 'roller' ? clamp(Math.hypot(this.vel.x, this.vel.z) / w.rollSpeed, 0, 1) : 0;
+    set('roll', 'roll', w.kind === 'roller' && wr.rolling, k * 0.45, 0.6 + k);
+    set('charge', 'charger_charge', w.kind === 'charger' && wr.charging, 0.35, 1 + wr.charge * 1.5);
+    set('spin', 'splatling_spin', w.kind === 'splatling' && (wr.charging || wr.streaming), 0.4, wr.streaming ? 1.5 : 0.6 + 0.85 * wr.charge);
+  }
+  stopRemoteLoops() { const L = this._rl; if (L) for (const k in L) { L[k]?.stop(0.1); L[k] = null; } }
+
+  // The owner respawned this squidkid: it drops in above its slot on the spawn deck (same spot the owner uses; the
+  // next snapshots take over from there).
+  remoteRespawn() {
+    const pad = G.level.spawnPads[this.team];
+    const a = (this.slot / 4) * Math.PI * 2 + 0.6;
+    this.alive = true; this.hp = PLAYER.hp; this.respawnTimer = 0; this.invuln = PLAYER.spawnInvuln;
+    this.form = 'kid'; this.submerged = false; this.climbing = false; this.superJumpState = null; this.specialActive = null;
+    this.pos.set(pad.x + Math.cos(a) * 1.1, pad.y + 4.5, pad.z + Math.sin(a) * 1.1);
+    this.vel.set(0, -4, 0);
+    this.yaw = this.aimYaw = this.team === 0 ? 0 : Math.PI;
+    this.weaponRunner.reset();
+    this._rc = null;
+    this.character.root.position.copy(this.pos);
+    this.character.setVisible(true);
+    this.character.setHurt(0, G.teamColors[this.enemyTeam]);
+    G.fx?.spawnFlash(_v2.set(this.pos.x, pad.y, this.pos.z), this.color);
+    emit('respawn', { actor: this });
+  }
+
+  // The owner used its special (the storm cloud arrives as its own throw event).
+  remoteSpecial(id) {
+    this.special = 0;
+    this.stats.specials++;
+    emit('special:use', { actor: this, id });
+    G.audio?.play('special_activate', { pos: this.isLocal ? undefined : this.pos, volume: 0.7 });
+  }
+  remoteSlam(pos) { this._slamFx(pos, SPECIALS.slam); }
 
   // Paint under the feet: 0 dry, 1 own ink, 2 enemy ink (only while grounded).
   _surface() {
@@ -760,11 +858,7 @@ export class Actor {
       area += G.paint.splat(_v, 1.1 + Math.random() * 0.6, this.team, { seed: Math.random() });
     }
     this.addTurfNoSpecial(area);
-    G.fx?.explosion(_v.copy(c).setY(c.y + 0.3), this.color, sp.radius);
-    G.audio?.play('special_slam', { pos: c });
-    emit('shake', { pos: c.clone(), amount: 1.0 });
-    emit('special:slam', { actor: this, pos: c.clone(), radius: sp.radius });
-    rumble(this, 0.9, 0.7, 320);
+    this._slamFx(c, sp);
     for (const a of G.actors) {
       if (a.team === this.team || !a.alive) continue;
       const d = a.pos.distanceTo(c);
@@ -773,6 +867,15 @@ export class Actor {
       _v.copy(a.pos); _v.y += 0.8;
       if (G.physics.los(_v2.copy(c).setY(c.y + 0.8), _v)) G.projectiles.applyHit(this, a, dmg, 'slam');
     }
+  }
+
+  // the slam's look + feel (the owner also paints and deals the damage; remote peers only get this part)
+  _slamFx(c, sp) {
+    G.fx?.explosion(_v.copy(c).setY(c.y + 0.3), this.color, sp.radius);
+    G.audio?.play('special_slam', { pos: c });
+    emit('shake', { pos: c.clone(), amount: 1.0 });
+    emit('special:slam', { actor: this, pos: c.clone(), radius: sp.radius });
+    rumble(this, 0.9, 0.7, 320);
   }
 
   addTurfNoSpecial(area) { if (area > 0) { this.stats.turf += area; emit('turf', { actor: this, area }); } }
@@ -822,7 +925,12 @@ export class Actor {
   _finishFrame(dt) {
     const a = this.anim;
     const isSquid = this.form === 'squid';
-    this._face(dt, isSquid);
+    if (this.owned) this._face(dt, isSquid);
+    else {
+      // remote: the facing comes from the owner's snapshots; the animation still wants the turn rate
+      a.turnRate = dt > 0 ? clamp(angleDiff(this._rYaw ?? this.yaw, this.yaw) / dt, -20, 20) : 0;
+      this._rYaw = this.yaw;
+    }
     const hs = Math.hypot(this.vel.x, this.vel.z);
     const cy = Math.cos(this.yaw), sy = Math.sin(this.yaw);
     a.speed = hs;

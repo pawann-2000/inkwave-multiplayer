@@ -1,6 +1,6 @@
 // INKWAVE — ink particle FX. Pooled, allocation-free per frame, 7 draw calls total.
 //
-// const fx = new FX(scene, { quality: 'high' });      // quality: QUALITY key | QUALITY preset | particles multiplier
+// const fx = new FX(scene, { quality: 1 });           // quality: particle multiplier (gfx.js profile.particles); fx.setQuality(q) live
 // fx.setCollider((from, to) => ({ point, normal }) | null)
 // fx.onDropletLand = (point, normal, color, size) => {} // point/normal/color are scratch objects — copy if kept
 // fx.onSpeck = (point, normal, color, size) => {}      // optional: ink speck where a non-painting droplet lands
@@ -34,7 +34,7 @@
 // spheres), beams (geysers + immediate light pillars), motes. Peak geometry ≈ 2 tris per sprite/droplet + 320/shell +
 // 336/beam — a heavy moment (bomb + slam + 8 players fighting) stays ≈ 10–16k triangles.
 import * as THREE from 'three';
-import { QUALITY, PLAYER } from '../config.js';
+import { PLAYER } from '../config.js';
 
 const UP = new THREE.Vector3(0, 1, 0);
 const TAU = Math.PI * 2;
@@ -654,6 +654,8 @@ function markUpdated(geo, count) {
   }
 }
 
+const MOTES_MAX = 300;   // ambient motes at the top effects level
+
 // scheduler ops (delayed parts of multi-stage effects)
 const OP_RING = 1, OP_CROWN = 2, OP_DUSTRING = 3;
 
@@ -663,9 +665,7 @@ const OP_RING = 1, OP_CROWN = 2, OP_DUSTRING = 3;
 export class FX {
   constructor(scene, opts = {}) {
     this.scene = scene;
-    const q = opts.quality;
-    this.q = typeof q === 'number' ? q : (typeof q === 'object' && q ? q.particles : (QUALITY[q] || QUALITY.high).particles) ?? 1;
-    this.q = Math.max(0.25, this.q);
+    this.q = Math.max(0.25, typeof opts.quality === 'number' ? opts.quality : 1);
     this.waterY = opts.waterY ?? PLAYER.waterY;
     this.gravity = opts.gravity ?? 17;
     this.collider = null;
@@ -673,7 +673,7 @@ export class FX {
     this.onSpeck = null;       // (point, normal, color, size): cosmetic ink speck where a non-painting droplet lands
     this.onRipple = null;      // (pos, amp, wavelength, speed, life): ripple through the ink surface (paint.ripple)
     this.paintEffects = true;  // explosion / splatted / flick droplets may leave cosmetic paint via onDropletLand
-    this.maxChecks = Math.round(1100 * this.q);
+    this.maxChecks = 0;        // collision checks per frame (setQuality)
     this._checks = 0;
     this._dt = 1 / 60;
     this._time = 0;
@@ -696,17 +696,27 @@ export class FX {
     this.root.name = 'FX';
     scene.add(this.root);
 
-    this._initDrops(Math.round(2600 * this.q));
-    this._initSprites(Math.round(520 * this.q), Math.round(300 * this.q));
-    this._initRings(Math.round(300 * this.q));
+    // pools sized for the top effects level (instanced draws only cover live instances, so spare capacity is free);
+    // setQuality then scales spawn counts live
+    this._initDrops(2600);
+    this._initSprites(520, 300);
+    this._initRings(300);
     this._initShells(32);
     this._initBeams(10);
-    this._initMotes(Math.round(300 * this.q));
+    this._initMotes(MOTES_MAX);
+    this.setQuality(this.q);
     // scheduler: [t, op, px, py, pz, nx, ny, nz, r, g, b, a0, a1, a2]
     this._sq = new Float32Array(96 * 14); this._sqN = 0;
   }
 
   setCollider(fn) { this.collider = fn; }
+
+  // Effects level (gfx.js profile.particles): spawn counts, collision checks, ambient motes.
+  setQuality(q) {
+    this.q = Math.max(0.25, +q || 1);
+    this.maxChecks = Math.round(1100 * this.q);
+    if (this.motes) this.motes.geometry.instanceCount = Math.round(MOTES_MAX * this.q);
+  }
 
   // ------------------------------------------------------------------ colour input → linear THREE.Color (no alloc after first use of a string)
   _color(c, out) {

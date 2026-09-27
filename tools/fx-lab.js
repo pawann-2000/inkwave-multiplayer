@@ -7,18 +7,18 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { Environment } from '../src/world/environment.js';
-import { QUALITY } from '../src/config.js';
+import { GFX_PRESETS, profileFromKnobs } from '../src/core/gfx.js';
 
 const params = new URLSearchParams(location.search);
 const qualityName = params.get('quality') || 'high';
-const Q = QUALITY[qualityName] || QUALITY.high;
+const Q = profileFromKnobs(GFX_PRESETS[qualityName] || GFX_PRESETS.high);
 const TEAM = { a: new THREE.Color('#ff8a14'), b: new THREE.Color('#2f5bff') };
 const BOUNDS = { minX: -25, maxX: 25, minZ: -44, maxZ: 44 };
 const layout = params.get('layout') || 'box';
 
 // ------------------------------------------------------------------ renderer (mirrors the game)
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2) * Q.pixelRatio);
+renderer.setPixelRatio(Math.min(devicePixelRatio, Q.density) * Q.res);
 renderer.setSize(innerWidth, innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.NeutralToneMapping;
@@ -94,7 +94,7 @@ for (const z of [-39.2, 39.2]) {
 
 // ------------------------------------------------------------------ environment
 const t0 = performance.now();
-const env = new Environment(renderer, scene, { bounds: BOUNDS, theme: params.get('theme') || 'day', shadowSize: Q.shadowSize, footprint });
+const env = new Environment(renderer, scene, { bounds: BOUNDS, theme: params.get('theme') || 'day', shadowSize: Q.shadowSize || 4096, footprint });
 scene.environment = env.envMap;
 const envBuildMs = performance.now() - t0;
 
@@ -141,7 +141,7 @@ function paintSplat(point, normal, color, size) {
 let fxError = null;
 try {
   const mod = await import('../src/fx/fx.js');
-  fx = new mod.FX(scene, { quality: qualityName });
+  fx = new mod.FX(scene, { quality: Q.particles });
   fx.setCollider(collider);
   fx.setLighting(env.getSkyColors());
   fx.onDropletLand = paintSplat;

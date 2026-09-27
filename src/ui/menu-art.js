@@ -472,6 +472,7 @@ export class InkWipe {
 // ================================================================================== settings previews
 // Every preview returns { el, set(value, settings), tick(dt) } and lives inside .iw-prev__stage (16:9 box).
 const MOUSE_RAD_PER_PX = 0.0021;   // src/game/player.js look scale
+const TOUCH_RAD_PER_PX = 0.0068;   // src/game/player.js touch look scale (per CSS px of thumb drag)
 const PAD_YAW_RATE = 3.4;          // rad/s at full stick × padSensitivity
 
 function frameSVG(inner, cls = '') {
@@ -491,7 +492,7 @@ const skyline = (w, seed) => {
   return out;
 };
 
-function previewLook(ctx, pad) {
+function previewLook(ctx, dev) {
   const W = 960;
   const pano = `<svg class="iw-pv-pano" viewBox="0 0 ${W} 180" preserveAspectRatio="none" aria-hidden="true">
     <rect width="${W}" height="100" fill="#8fd3f5"/>${skyline(W, 17)}
@@ -501,14 +502,15 @@ function previewLook(ctx, pad) {
     ${Array.from({ length: 6 }, (_, i) => { const x = 40 + i * 160; return `<rect x="${x}" y="84" width="46" height="34" rx="6" fill="#fff7e8" stroke="#d9cbb0" stroke-width="3"/>`; }).join('')}
   </svg>`;
   const screen = h('div', { class: 'iw-pv-screen', html: pano + `<i class="iw-pv-xhair"></i>` });
-  const inputEl = h('div', { class: 'iw-pv-input', html: pad ? padGlyph('RS') : mouseGlyph('M') });
+  const inputEl = h('div', { class: 'iw-pv-input', html: dev === 'pad' ? padGlyph('RS') : dev === 'touch' ? `<span class="iw-pv-finger">${GLYPHS.touch}</span>` : mouseGlyph('M') });
   const stat = h('div', { class: 'iw-pv-stat' });
   const el = h('div', { class: 'iw-pv iw-pv--look' }, screen, h('div', { class: 'iw-pv-row' }, inputEl, stat));
   const panoEl = screen.firstElementChild;
   let v = +ctx.value || 1, ph = 0, shown = v;
   const set = (nv) => {
     v = +nv || 1;
-    if (pad) stat.innerHTML = `Full-stick 360° turn in <b>${(TAU / (PAD_YAW_RATE * v)).toFixed(2)} s</b>`;
+    if (dev === 'pad') stat.innerHTML = `Full-stick 360° turn in <b>${(TAU / (PAD_YAW_RATE * v)).toFixed(2)} s</b>`;
+    else if (dev === 'touch') stat.innerHTML = `Half-turn for a <b>${fmtInt(Math.PI / (TOUCH_RAD_PER_PX * v))} px</b> thumb drag`;
     else stat.innerHTML = `<b>${fmtInt(TAU / (MOUSE_RAD_PER_PX * v))} px</b> of mouse travel per 360° turn`;
   };
   set(v);
@@ -578,27 +580,85 @@ function previewFov(ctx) {
   };
 }
 
+// graphics: the knobs in effect (preset, Auto's current level, or Custom) — gfx.js keys
+const LV = { off: 'Off', low: 'Low', medium: 'Med', high: 'High' };
+const AA_LABEL = { off: 'Off', fxaa: 'FXAA', msaa2: '2× MSAA', msaa4: '4× MSAA' };
+const gfxChips = (k) => [
+  ['Resolution', `${Math.round((k.gfxRes ?? 1) * 100)}%`],
+  ['Shadows', LV[k.gfxShadows] || '—'],
+  ['Anti-aliasing', AA_LABEL[k.gfxAA] || '—'],
+  ['Ambient occl.', k.gfxAO ? 'On' : 'Off'],
+  ['Bloom', k.gfxBloom ? 'On' : 'Off'],
+  ['Reflections', LV[k.gfxRefl] || '—'],
+  ['Effects', LV[k.gfxEffects] || '—'],
+  ['World detail', LV[k.gfxDetail] || '—'],
+];
 function previewQuality(ctx) {
   const tiers = [['low', 'LOW'], ['medium', 'MED'], ['high', 'HIGH'], ['ultra', 'ULTRA']];
   const ladder = h('div', { class: 'iw-pv-ladder' }, tiers.map(([id, lab], i) => h('span', { class: 'iw-pv-ladder__col', 'data-q': id, style: { '--h': (0.3 + i * 0.233).toFixed(3) } }, h('i'), h('b', null, lab))));
+  const head = h('div', { class: 'iw-pv-gfxhead' });
   const chips = h('div', { class: 'iw-pv-chips' });
-  const el = h('div', { class: 'iw-pv iw-pv--quality' }, ladder, chips);
-  const Q = ctx.qualityTable || {};
-  const set = (v) => {
-    const q = Q[v] || Q.high || {};
-    ladder.querySelectorAll('.iw-pv-ladder__col').forEach((c) => c.classList.toggle('is-on', c.dataset.q === v));
-    const rows = [
-      ['Pixel density', `up to ${(+q.pixelRatio || 1).toFixed(q.pixelRatio % 1 ? 2 : 1).replace(/0$/, '')}×`],
-      ['Shadow map', `${q.shadowSize || 0}px`],
-      ['Anti-aliasing', q.msaa ? `${q.msaa}× MSAA` : 'Off'],
-      ['Ink detail', `${Math.round((q.paintAtlas || 2048) / 1024)}K atlas`],
-      ['Ambient occlusion', q.ao ? 'On' : 'Off'],
-      ['Particles', `${Math.round((q.particles ?? 1) * 100)}%`],
-    ];
+  const el = h('div', { class: 'iw-pv iw-pv--quality' }, ladder, h('div', { class: 'iw-pv-gfxside' }, head, chips));
+  const set = (v, settings) => {
+    const st = ctx.gfxStatus ? ctx.gfxStatus() : null;
+    const k = (st && st.knobs) || settings || ctx.settings || {};
+    const col = v === 'auto' ? (st && st.base) : v;
+    ladder.querySelectorAll('.iw-pv-ladder__col').forEach((c) => c.classList.toggle('is-on', c.dataset.q === col));
+    head.textContent = '';
+    if (v === 'auto') head.append(h('b', null, 'AUTO'), st ? ` ${st.gpu} → ${st.level}` : '');
+    else if (v === 'custom') head.append(h('b', null, 'CUSTOM'), ' your own mix');
     chips.innerHTML = '';
-    rows.forEach(([k, val], i) => chips.appendChild(h('span', { class: 'iw-pv-chip' + (/Off|0%/.test(val) ? ' is-off' : ''), style: { '--i': i } }, h('small', null, k), h('b', null, val))));
+    gfxChips(k).forEach(([name, val], i) => chips.appendChild(h('span', { class: 'iw-pv-chip' + (/^(Off|—)$/.test(val) ? ' is-off' : ''), style: { '--i': i } }, h('small', null, name), h('b', null, val))));
+  };
+  set(ctx.value, ctx.settings);
+  return { el, set };
+}
+
+// One graphics option: its choices as a cost ladder (taller = heavier) with the current one lit, and what it means.
+const GFX_OPTION = {
+  gfxAA: { opts: [['off', 'OFF'], ['fxaa', 'FXAA'], ['msaa2', '2×'], ['msaa4', '4×']],
+    cap: { off: 'Jagged edges · <b>fastest</b>', fxaa: '<b>FXAA</b>: smoother edges for almost nothing', msaa2: '<b>2× MSAA</b>: crisp edges, moderate cost', msaa4: '<b>4× MSAA</b>: crispest · heavy on integrated graphics' } },
+  gfxRefl: { opts: [['off', 'OFF'], ['low', 'LOW'], ['medium', 'MED'], ['high', 'HIGH']],
+    cap: { off: 'Harbor water shows <b>sky only</b>', low: '<b>Low</b>: a soft mirror of the docks', medium: '<b>Medium</b>: a sharper mirror', high: '<b>High</b>: sharpest, squid kids reflected too' } },
+  gfxEffects: { opts: [['low', 'LOW'], ['medium', 'MED'], ['high', 'HIGH']],
+    cap: { low: '<b>Fewer</b> particles · splats animate only up close', medium: '<b>More</b> particles and screen effects', high: '<b>Every</b> droplet, full lens ink' } },
+  gfxDetail: { opts: [['low', 'LOW'], ['medium', 'MED'], ['high', 'HIGH']],
+    cap: { low: '2K ink, simpler surfaces · from the <b>next match</b>', medium: '2K ink, finer props · from the <b>next match</b>', high: '4K ink, full detail · from the <b>next match</b>' } },
+  gfxAO: { opts: [[false, 'OFF'], [true, 'ON']],
+    cap: { false: 'Off · the <b>biggest speed-up</b> on integrated graphics', true: 'Soft contact shadows · the <b>most expensive</b> effect' } },
+  gfxDynRes: { opts: [[false, 'OFF'], [true, 'ON']],
+    cap: { false: 'Resolution <b>stays fixed</b>', true: 'Fixed presets drop resolution a notch <b>while fps sinks</b>' } },
+  gfxDensity: { opts: [[1, '1×'], [1.5, '1.5×'], [2, '2×']],
+    cap: (v) => `Up to <b>${v}×</b> pixels per point · ${(window.devicePixelRatio || 1) > 1 ? `this screen is ${+(window.devicePixelRatio || 1).toFixed(2)}×` : 'no effect on this screen'}` },
+  fpsLimit: { opts: [[30, '30'], [60, '60'], [120, '120'], [0, 'OFF']],
+    cap: { 30: '<b>30 fps</b> · coolest and quietest', 60: '<b>60 fps</b> · smooth, saves power on fast screens', 120: '<b>120 fps</b> for high-refresh screens', 0: 'Follows your <b>display</b>' } },
+};
+function previewGfxOption(ctx, key) {
+  const def = GFX_OPTION[key];
+  const n = def.opts.length;
+  const ladder = h('div', { class: 'iw-pv-ladder iw-pv-ladder--opt' }, def.opts.map(([v, lab], i) => h('span', { class: 'iw-pv-ladder__col', style: { '--h': (0.3 + (i / Math.max(1, n - 1)) * 0.7).toFixed(3) } }, h('i'), h('b', null, lab))));
+  const cap = h('div', { class: 'iw-pv-cap' });
+  const el = h('div', { class: 'iw-pv iw-pv--gfx' }, ladder, cap);
+  const cols = [...ladder.children];
+  const set = (v) => {
+    const i = def.opts.findIndex((o) => o[0] === v);
+    cols.forEach((c, k) => c.classList.toggle('is-on', k === i));
+    cap.innerHTML = typeof def.cap === 'function' ? def.cap(v) : (def.cap[String(v)] || '');
   };
   set(ctx.value);
+  return { el, set };
+}
+function previewRes(ctx) {
+  const num = h('div', { class: 'iw-pv-big iw-display' });
+  const cap = h('div', { class: 'iw-pv-cap' });
+  const el = h('div', { class: 'iw-pv iw-pv--gfx' }, num, cap);
+  const set = (v, s) => {
+    const dens = Math.min(window.devicePixelRatio || 1, +((s || ctx.settings || {}).gfxDensity) || 1);
+    v = +v || 1;
+    num.textContent = `${Math.round(v * 100)}%`;
+    cap.innerHTML = `The 3D scene draws <b>${Math.round(innerWidth * dens * v)}×${Math.round(innerHeight * dens * v)}</b> pixels · menus stay sharp`;
+  };
+  set(ctx.value, ctx.settings);
   return { el, set };
 }
 
@@ -611,7 +671,8 @@ function previewShadows(ctx) {
     <g transform="translate(160 74) scale(.5)" style="color:var(--a)">${SQUID.replace('class="iw-ico iw-squid"', 'x="0" y="0" width="64" height="64"')}</g>
     <path class="iw-fa" d="M60 150 q20 -9 40 0 q10 6 -6 12 q-20 7 -34 -2 q-8 -6 0 -10z"/>`) + '<div class="iw-pv-cap"></div>' });
   const cap = el.querySelector('.iw-pv-cap');
-  const set = (v) => { el.classList.toggle('is-on', !!v); cap.innerHTML = v ? 'Soft sun shadows <b>ON</b>' : 'Shadows <b>OFF</b> — faster on older machines'; };
+  const CAP = { off: 'Shadows <b>OFF</b> · the fastest', low: '<b>Low</b>: 1K map, redrawn every other frame', medium: '<b>Medium</b>: 2K soft shadows', high: '<b>High</b>: 4K soft shadows' };
+  const set = (v) => { el.classList.toggle('is-on', !!v && v !== 'off'); cap.innerHTML = CAP[v] || ''; };
   set(ctx.value);
   return { el, set };
 }
@@ -834,16 +895,20 @@ function previewReset() {
   return { el, set() {} };
 }
 
-/** ctx: { value, settings, qualityTable, palettes, cbPalette, diffs, diffInfo, durations, tab } */
+/** ctx: { value, settings, gfxStatus(), palettes, cbPalette, diffs, diffInfo, durations, tab } */
 export function createPreview(key, ctx = {}) {
   switch (key) {
-    case 'sensitivity': return previewLook(ctx, false);
-    case 'padSensitivity': return previewLook(ctx, true);
+    case 'sensitivity': return previewLook(ctx, 'mouse');
+    case 'padSensitivity': return previewLook(ctx, 'pad');
+    case 'touchSensitivity': return previewLook(ctx, 'touch');
     case 'invertY': return previewInvert(ctx);
     case 'quality': return previewQuality(ctx);
     case 'fov': return previewFov(ctx);
-    case 'shadows': return previewShadows(ctx);
-    case 'bloom': return previewBloom(ctx);
+    case 'gfxShadows': return previewShadows(ctx);
+    case 'gfxBloom': return previewBloom(ctx);
+    case 'gfxRes': return previewRes(ctx);
+    case 'gfxAA': case 'gfxRefl': case 'gfxEffects': case 'gfxDetail': case 'gfxAO': case 'gfxDynRes': case 'gfxDensity': case 'fpsLimit':
+      return previewGfxOption(ctx, key);
     case 'showFps': return previewFps(ctx);
     case 'minimap': return previewMinimap(ctx);
     case 'cameraShake': return previewShake(ctx);

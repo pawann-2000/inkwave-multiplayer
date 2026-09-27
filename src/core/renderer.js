@@ -1,4 +1,6 @@
-// Renderer + post stack (MSAA HDR target → optional GTAO → bloom → grade/vignette → output).
+// Renderer + post stack: HDR target (optional MSAA) → optional GTAO → optional bloom → grade/vignette → screen FX →
+// output (tone map + sRGB) → optional FXAA. Driven by a graphics profile (src/core/gfx.js resolveGfx); setProfile applies
+// only what changed: pixel ratio in place, pass / target changes by rebuilding the composer (old passes disposed).
 import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
@@ -6,8 +8,8 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
-import { QUALITY } from '../config.js';
-import { G } from './ctx.js';
+import { FXAAPass } from 'three/addons/postprocessing/FXAAPass.js';
+import { G, view } from './ctx.js';
 
 const GradeShader = {
   uniforms: {
@@ -56,32 +58,53 @@ const GradeShader = {
 
 // r186's PCF filter uses a 5-tap rotated Vogel disk with per-pixel noise, which reads as grainy stipple on every soft
 // shadow edge. Swap it for a noise-free 3×3 grid of hardware-compared (bilinear) taps: smooth and temporally stable.
+// A light with shadow.radius 0 (the low shadow setting) takes a single hardware-filtered tap instead: the branch is on a
+// uniform, so it costs nothing and switching needs no shader recompile.
 (function patchShadowFilter() {
   const chunk = THREE.ShaderChunk.shadowmap_pars_fragment;
   const re = /shadow = \(\s*texture\( shadowMap, vec3\( shadowCoord\.xy \+ vogelDiskSample\( 0, 5, phi \) \* radius, shadowCoord\.z \) \)[\s\S]*?\) \* 0\.2;/;
   if (!re.test(chunk)) { console.warn('[inkwave] shadow chunk layout changed; keeping stock PCF'); return; }
-  THREE.ShaderChunk.shadowmap_pars_fragment = chunk.replace(re, `vec2 ts = texelSize * max( shadowRadius * 0.55, 0.6 );
-				float s9 = 0.0;
-				for ( int sx = -1; sx <= 1; sx ++ ) for ( int sy = -1; sy <= 1; sy ++ ) s9 += texture( shadowMap, vec3( shadowCoord.xy + vec2( float( sx ), float( sy ) ) * ts, shadowCoord.z ) );
-				shadow = s9 * ( 1.0 / 9.0 );`);
+  THREE.ShaderChunk.shadowmap_pars_fragment = chunk.replace(re, `if ( shadowRadius > 0.0 ) {
+					vec2 ts = texelSize * max( shadowRadius * 0.55, 0.6 );
+					float s9 = 0.0;
+					for ( int sx = -1; sx <= 1; sx ++ ) for ( int sy = -1; sy <= 1; sy ++ ) s9 += texture( shadowMap, vec3( shadowCoord.xy + vec2( float( sx ), float( sy ) ) * ts, shadowCoord.z ) );
+					shadow = s9 * ( 1.0 / 9.0 );
+				} else {
+					shadow = texture( shadowMap, shadowCoord.xyz );
+				}`);
 })();
 
+// three keys shader programs on the render target they draw into (tone mapping and output colour space differ between
+// the canvas and a render target), and compile() only visits visible objects. Pre-compile against the target a scene is
+// really drawn into — hidden objects included on request — or the first frames compile everything again, synchronously
+// (measured: ~50 of 128 boot programs were built twice). compile() runs synchronously inside compileAsync, so the
+// target and visibility are restored before this returns; only the completion polling is async.
+export function compileAsyncFor(renderer, scene, camera, target = null, { includeHidden = false } = {}) {
+  const prev = renderer.getRenderTarget(), shown = [];
+  if (includeHidden) scene.traverse((o) => { if (!o.visible) { o.visible = true; shown.push(o); } });
+  renderer.setRenderTarget(target);
+  try { return renderer.compileAsync(scene, camera); } finally {
+    renderer.setRenderTarget(prev);
+    for (const o of shown) o.visible = false;
+  }
+}
+
 export class Renderer {
-  constructor(container, settings) {
+  constructor(container, profile) {
     const r = (this.renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance', stencil: false }));
     r.outputColorSpace = THREE.SRGBColorSpace;
     r.toneMapping = THREE.NeutralToneMapping;
     r.toneMappingExposure = 1.0;
     r.info.autoReset = false;
-    r.shadowMap.enabled = true;
+    r.shadowMap.enabled = profile.shadows !== 'off';
     r.shadowMap.type = THREE.PCFShadowMap;
     r.setClearColor(0x9fd8f0, 1);
     container.appendChild(r.domElement);
     r.domElement.id = 'game-canvas';
     this.container = container;
     this.scene = null; this.camera = null;
-    this.settings = settings;
-    this.q = QUALITY[settings.quality] || QUALITY.high;
+    this.p = profile;            // graphics profile (gfx.js resolveGfx)
+    this.dynScale = 1;           // dynamic resolution on top of the profile (0.5–1)
     this._w = 0; this._h = 0;
   }
 
@@ -90,22 +113,32 @@ export class Renderer {
     this._buildComposer();
   }
 
+  // Device pixels per CSS pixel: the screen's density up to the profile's cap, × resolution scale × dynamic scale.
+  pixelRatio() { return Math.min(window.devicePixelRatio || 1, this.p.density) * this.p.res * this.dynScale; }
+
+  _disposeComposer() {
+    const c = this.composer;
+    if (!c) return;
+    for (const pass of c.passes) if (pass !== this.extraPass) pass.dispose?.();
+    c.dispose();   // ping-pong targets + its internal copy pass
+    this.composer = null;
+  }
+
   _buildComposer() {
-    const r = this.renderer, q = this.q;
-    if (this.composer) { this.composer.renderTarget1.dispose(); this.composer.renderTarget2.dispose(); }
-    this.dynScale = this.dynScale || 1;
-    const pr = Math.min(window.devicePixelRatio || 1, q.pixelRatio) * this.dynScale;
+    const r = this.renderer, p = this.p;
+    this._disposeComposer();
+    const pr = this.pixelRatio();
     r.setPixelRatio(pr);
     const w = window.innerWidth, h = window.innerHeight;
     r.setSize(w, h);
-    const rt = new THREE.WebGLRenderTarget(w * pr, h * pr, { type: THREE.HalfFloatType, samples: q.msaa || 0 });
+    const rt = new THREE.WebGLRenderTarget(w * pr, h * pr, { type: THREE.HalfFloatType, samples: p.msaa });
     const comp = (this.composer = new EffectComposer(r, rt));
     comp.setPixelRatio(pr);
     comp.setSize(w, h);
     this.renderPass = new RenderPass(this.scene, this.camera);
     comp.addPass(this.renderPass);
     this.gtao = null;
-    if (q.ao) {
+    if (p.ao) {
       const ao = (this.gtao = new GTAOPass(this.scene, this.camera, w, h));
       ao.output = GTAOPass.OUTPUT.Default;
       ao.blendIntensity = 1.0;
@@ -113,63 +146,70 @@ export class Renderer {
       ao.updatePdMaterial({ lumaPhi: 10, depthPhi: 2, normalPhi: 3, radius: 6, rings: 2, samples: 16 });
       comp.addPass(ao);
     }
-    this.bloom = new UnrealBloomPass(new THREE.Vector2(w, h), 0.28, 0.45, 2.4);
-    this.bloom.enabled = !!(q.bloom && this.settings.bloom);
-    comp.addPass(this.bloom);
+    this.bloom = null;
+    if (p.bloom) { this.bloom = new UnrealBloomPass(new THREE.Vector2(w, h), 0.28, 0.45, 2.4); comp.addPass(this.bloom); }
     this.grade = new ShaderPass(GradeShader);
     this._gradeSrc = null;
     comp.addPass(this.grade);
     // optional screen-FX pass (src/fx/screenfx.js) — runs in HDR linear space before tone mapping/output
     if (this.extraPass) comp.addPass(this.extraPass);
     comp.addPass(new OutputPass());
-    r.shadowMap.enabled = this.settings.shadows !== false;
+    // FXAA works on the tone-mapped sRGB image, so it is the last pass
+    this.fxaa = null;
+    if (p.fxaa) { this.fxaa = new FXAAPass(); comp.addPass(this.fxaa); }
     this._w = w; this._h = h;
     this.grade.uniforms.uAspect.value = w / h;
+    this._built = { msaa: p.msaa, ao: p.ao, bloom: p.bloom, fxaa: p.fxaa };
   }
 
-  // Install (or replace) the screen-FX post pass; kept across quality/setting rebuilds.
+  // Install (or replace) the screen-FX post pass; kept across profile rebuilds.
   setExtraPass(pass) {
     this.extraPass = pass;
     if (this.scene) this._buildComposer();
   }
 
-  applySettings(settings) {
-    const prevQ = this.q;
-    this.settings = settings;
-    this.q = QUALITY[settings.quality] || QUALITY.high;
-    const shadowChanged = this.renderer.shadowMap.enabled !== (settings.shadows !== false);
-    if (prevQ !== this.q || shadowChanged) {
-      if (prevQ !== this.q) this.dynScale = 1;
-      this._buildComposer();
-      this.scene?.traverse((o) => { if (o.material) { const m = Array.isArray(o.material) ? o.material : [o.material]; m.forEach((mm) => (mm.needsUpdate = true)); } });
-    }
-    if (this.bloom) this.bloom.enabled = !!(this.q.bloom && settings.bloom);
+  // Apply a new graphics profile. Returns true when shadows were switched on or off: every material that receives
+  // shadows then needs recompiling (the caller marks them — it knows every scene, the showcase's included).
+  setProfile(p) {
+    const r = this.renderer;
+    this.p = p;
+    const b = this._built;
+    if (b && (b.msaa !== p.msaa || b.ao !== p.ao || b.bloom !== p.bloom || b.fxaa !== p.fxaa)) this._buildComposer();
+    else if (Math.abs(r.getPixelRatio() - this.pixelRatio()) > 1e-6) this._applyPixelRatio();
+    const shadows = p.shadows !== 'off';
+    if (r.shadowMap.enabled === shadows) return false;
+    r.shadowMap.enabled = shadows;
+    return true;
   }
 
-  // Dynamic resolution (never on ultra): scale the render density between 0.75 and 1 of the quality preset.
+  // Dynamic resolution: a share (0.5–1) of the profile's resolution.
   setDynamicScale(s) {
-    s = Math.max(0.75, Math.min(1, s));
+    s = Math.max(0.5, Math.min(1, s));
     if (Math.abs(s - this.dynScale) < 0.01) return;
     this.dynScale = s;
-    const pr = Math.min(window.devicePixelRatio || 1, this.q.pixelRatio) * s;
+    this._applyPixelRatio();
+  }
+
+  _applyPixelRatio() {
+    if (!this.composer) return;
+    const pr = this.pixelRatio();
     this.renderer.setPixelRatio(pr);
     this.composer.setPixelRatio(pr);
     this.composer.setSize(this._w, this._h);
   }
 
   resize() {
-    const w = window.innerWidth, h = window.innerHeight;
+    const w = view.w, h = view.h;
     if (w === this._w && h === this._h) return;
     this._w = w; this._h = h;
     this.renderer.setSize(w, h);
-    this.composer.setSize(w, h);
-    this.gtao?.setSize(w, h);
+    this.composer.setSize(w, h);   // resizes every pass (GTAO included) at the current pixel ratio
     this.grade.uniforms.uAspect.value = w / h;
     if (this.camera) { this.camera.aspect = w / h; this.camera.updateProjectionMatrix(); }
   }
 
   render() {
-    this.resize();
+    if (view.w !== this._w || view.h !== this._h) this.resize();
     // colour grade recommended by the environment theme (day / dusk)
     const gr = G.env && G.env.grade;
     if (gr && gr !== this._gradeSrc && this.grade) {

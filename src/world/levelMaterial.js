@@ -248,7 +248,10 @@ float gWake = 0.0;`)
   vec2 fsz = vFaceData.zw;
   vec3 base = diffuseColor.rgb;
   float rough = 0.82;
-  float big = fbm(vWPos.xz * 0.18 + vWPos.y * 0.1);
+  float big = 0.5;              // 4-octave fbm: only the procedural fallback and mural weathering read it
+#ifndef USE_TEXLIB
+  big = fbm(vWPos.xz * 0.18 + vWPos.y * 0.1);
+#endif
   float fine = vnoise(fu * 9.0);
 #ifdef USE_TEXLIB
   {
@@ -577,6 +580,9 @@ float gWake = 0.0;`)
     // atlas rect (mA) + placement on the face in metres (mB: x0, xLen, y0, yLen; xLen < 0 = strip repeating every
     // -xLen face heights, yLen <= 0 = full face height) + weathering (mC: surface shows through, paint damage cuts it)
     int mi = int(vFaceFlags.z + 0.5);
+#ifdef USE_TEXLIB
+    big = fbm(vWPos.xz * 0.18 + vWPos.y * 0.1);
+#endif
     vec4 mA = uMurA[mi], mB = uMurB[mi];
     vec2 mC = uMurC[mi];
     float my = mB.w > 0.0 ? (fu.y - mB.z) / mB.w : fu.y / fsz.y;
@@ -709,6 +715,9 @@ ${INK_EMISSIVE}`)
     mat.side = THREE.DoubleSide;
     mat.defines = { ...(mat.defines || {}), GRATE: 1 };
   }
-  mat.customProgramCacheKey = () => 'inkwave-level-v5' + (opts.grate ? '-grate' : '');
+  // low world detail: no close-up cubic ink reconstruction, no ink ripples, one texture tap instead of the 3-tap
+  // anti-tiling blend (≈ 13 % of the frame at low settings on an Intel UHD 630)
+  if (opts.lite) mat.defines = { ...(mat.defines || {}), LEVEL_LITE: 1, TEXLIB_SINGLE_TAP: 1 };
+  mat.customProgramCacheKey = () => 'inkwave-level-v5' + (opts.grate ? '-grate' : '') + (opts.lite ? '-lite' : '');
   return mat;
 }

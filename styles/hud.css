@@ -674,5 +674,7 @@
   border: 3px solid #fff; box-shadow: 0 0 0 2px var(--k), inset 0 0 0 2px var(--k); transition: scale .15s var(--spring2, ease-out); }
 .iw-dio__cur.is-snap i { scale: .55; border-color: var(--c); }
 
-/* while the diorama is up: no crosshair, name tags, corner minimap or prompts over the view */
-body.iw-dio-on .iw-xh, body.iw-dio-on .iw-mks, body.iw-dio-on .iw-map, body.iw-dio-on .iw-prompt, body.iw-dio-on .iw-callouts { opacity: 0; transition: opacity .12s; }
+/* while the diorama is up: no crosshair, name tags, corner minimap, prompts or splatted card over the view (planning a
+   Super Jump while waiting to respawn — the countdown stays in the roster) */
+body.iw-dio-on .iw-xh, body.iw-dio-on .iw-mks, body.iw-dio-on .iw-map, body.iw-dio-on .iw-prompt, body.iw-dio-on .iw-callouts,
+body.iw-dio-on .iw-spl, body.iw-dio-on .iw-spl__tint { opacity: 0; transition: opacity .12s; }

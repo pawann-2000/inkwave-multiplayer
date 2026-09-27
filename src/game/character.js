@@ -621,6 +621,19 @@ export class Character {
     if (w.left) this.bones.handL.add(w.left.pivot);
     this.weaponKind = kind; this.weapon = w; this.hold = HOLD[kind];
     this.dual = !!w.left;
+    this._leanShadow = undefined;   // a freshly built weapon casts by default: re-apply the shadow LOD next update
+  }
+
+  // Low shadow quality: only the body casts. Hair, weapon and bomb shadows are sub-texel on that map, and every caster
+  // is one more shadow-pass draw per squidkid.
+  _shadowCasters(lean) {
+    this._leanShadow = lean;
+    this.meshes.hair.castShadow = !lean;
+    for (const k in this.weapons) for (const x of [this.weapons[k], this.weapons[k].left]) if (x) {
+      x.body.castShadow = x.ink.castShadow = x.bodyFar.castShadow = x.inkFar.castShadow = !lean;
+      if (x.drum) x.drum.userData.ink.castShadow = !lean;
+    }
+    if (this.bomb) this.bomb.group.traverse((m) => { if (m.isMesh) m.castShadow = !lean; });
   }
 
   trigger(name, arg) {
@@ -797,6 +810,8 @@ export class Character {
     this.prevDanceT += dt; this.danceFade = Math.min(1, this.danceFade + dt / 0.45);
     this.inWorld = !!(G.scene && this.root.parent === G.scene && G.physics);
     this.phys = this.inWorld ? G.physics : null;
+    const lean = this.inWorld && G.gfx?.shadows === 'low';   // (menu close-ups keep every shadow)
+    if (lean !== this._leanShadow) this._shadowCasters(lean);
 
     // ---- inputs ----
     const form = s.form || 'kid';
@@ -1567,6 +1582,7 @@ export class Character {
   _animWeapon(dt, s, w) {
     let near = true;
     if (this.inWorld && !this.isLocal && G.camera) near = G.camera.position.distanceToSquared(this.root.position) < 15 * 15;
+    if (this.tank.glass.visible !== near) this.tank.glass.visible = near;   // far: the tank's glass shell is a few px — one transparent draw less
     const st = this._wst;
     st.t = this.t; st.dt = dt; st.color = this.color; st.near = near; st.hand = 0;
     st.runner = this._runner(s); st.sinceShoot = this.tr[T_SHOOT]; st.sinceFlick = this.tr[T_FLICK]; st.sinceRelease = this.lastRelease;
