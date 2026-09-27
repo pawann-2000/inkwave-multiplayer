@@ -292,7 +292,7 @@ class FxHooks {
     const G = this.G, fx = G.fx;
     if (!fx || !this.enabled || !(dt > 0)) return;
     this.time += dt; this.stamp++;
-    if (G.paint && G.camera && G.paint.viewPos !== G.camera.position) G.paint.setView?.(G.camera.position);
+    if (G.paint && G.camera && (G.paint.viewPos !== G.camera.position || G.paint.viewCam !== G.camera)) G.paint.setView?.(G.camera.position, G.camera);
     if (G.actors) for (let i = 0; i < G.actors.length; i++) this._actor(G.actors[i], dt);
     const P = G.projectiles;
     if (P) {

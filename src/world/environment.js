@@ -3,7 +3,7 @@
 // pier pilings + dock details hugging the deck, and far scenery (skyline, port cranes, lighthouse, islands, bridge,
 // ferris wheel, sailboats, buoys, gulls). All far scenery fades into the sky with a sky-matched aerial haze.
 //
-// const env = new Environment(renderer, scene, { bounds, theme: 'day'|'sunset'|'golden', shadowSize, footprint })
+// const env = new Environment(renderer, scene, { bounds, theme: 'day'|'sunset'|'golden', shadowSize, shadowSoft, footprint })
 //   footprint (optional): array of {minX,maxX,minZ,maxZ} rects = the deck slab's XZ outline (default [bounds]).
 //   Used for pilings, water foam, under-deck shading and the analytic deck shadow on the water.
 //   setTheme(name) switches light/sky/sea in place; rebuildForArena(bounds, footprint) follows a stage change.
@@ -1340,6 +1340,7 @@ export class Environment {
     this.bounds = { minX: b.minX, maxX: b.maxX, minZ: b.minZ, maxZ: b.maxZ };
     this.footprint = (opts.footprint && opts.footprint.length ? opts.footprint : [this.bounds]).slice(0, MAX_RECTS).map((r) => ({ ...r }));
     this.shadowSize = opts.shadowSize || 4096;
+    this.shadowSoft = opts.shadowSoft !== false;   // false: one hardware-filtered tap (renderer.js patchShadowFilter)
     this.waterY = WATER_Y;
     this.time = 0;
     this.theme = null;
@@ -1355,7 +1356,8 @@ export class Environment {
     // The theme only supplies its look (THEMES[*].marina).
     this._marina = this._stageMarina();
     this._frameId = 0;
-    this.reflections = true;   // marina planar reflections (perf lever; low quality turns them off regardless)
+    this.reflScale = 0.4;      // marina planar reflections: target size as a share of the drawing buffer (0 = off)
+    this.reflActors = false;   // squid kids, FX and small props in the reflection too (the costliest part: draw calls)
 
     this._initUniforms();
     this._buildLights();
@@ -1404,7 +1406,7 @@ export class Environment {
     sun.name = 'Sun';
     sun.castShadow = true;
     sun.shadow.mapSize.set(this.shadowSize, this.shadowSize);
-    sun.shadow.radius = 2.2 * (this.shadowSize / 4096) + 0.8;
+    sun.shadow.radius = this._shadowRadius();
     const cx = (this.bounds.minX + this.bounds.maxX) / 2, cz = (this.bounds.minZ + this.bounds.maxZ) / 2;
     sun.target.position.set(cx, 0, cz);
     this.scene.add(sun, sun.target);
@@ -1413,6 +1415,21 @@ export class Environment {
     this.hemi.name = 'SkyFill';
     this.scene.add(this.hemi);
   }
+
+  _shadowRadius() { return this.shadowSoft ? 2.2 * (this.shadowSize / 4096) + 0.8 : 0; }
+
+  // Graphics settings: shadow map resolution + filter, live (three resizes the map in place; no shader recompile).
+  setShadows(size, soft) {
+    size = size || this.shadowSize;
+    if (size === this.shadowSize && soft === this.shadowSoft) return;
+    this.shadowSize = size; this.shadowSoft = soft;
+    this.sun.shadow.mapSize.set(size, size);
+    this.sun.shadow.radius = this._shadowRadius();
+    this._fitShadow();   // normal bias follows the texel size
+  }
+
+  // Graphics settings: planar reflection size (share of the drawing buffer, 0 = off) and whether actors / FX reflect.
+  setReflections(scale, actors) { this.reflScale = scale; this.reflActors = !!actors; }
 
   // Fit the orthographic shadow camera tightly around the arena box as seen from the sun.
   _fitShadow() {
@@ -1487,7 +1504,9 @@ export class Environment {
   }
 
   // Bake the cumulus dome for the current theme (sun direction/colour + sky). Rendered in horizontal strips so no
-  // single GPU job runs long; ~0.1–0.3 s once per theme change.
+  // single GPU job runs long; ~0.1–0.3 s once per theme change. Each strip is flushed on its own: unflushed, the
+  // strips (plus whatever the stage build queued) reach the driver as ONE batch, and on weak iGPUs (measured: Intel
+  // UHD 630 / i915) a batch past the kernel's ~640 ms preemption timeout resets the GPU — WebGL context lost at boot.
   _bakeClouds(T) {
     const r = this.renderer, u = this._cloudMat.uniforms;
     u.uSunCol.value.copy(lin(T.sunColor, T.sunIntensity / 2.75));
@@ -1504,6 +1523,7 @@ export class Environment {
       rt.scissor.set(0, i * h, CLOUD_W, Math.min(h, CLOUD_H - i * h));
       r.setRenderTarget(rt);
       r.render(this._cloudScene, this._cloudCam);
+      r.getContext().flush();
     }
     rt.scissorTest = false;
     r.setRenderTarget(prev);
@@ -1512,7 +1532,10 @@ export class Environment {
 
   _rebuildEnvMap() {
     const old = this._envRT;
+    const gl = this.renderer.getContext();
+    gl.flush();   // submit the cloud bake before the PMREM passes (keeps each GPU batch short — see _bakeClouds)
     this._envRT = this._pmrem.fromScene(this._envScene, 0, 0.1, 100, { size: 256 });
+    gl.flush();
     const prev = this.envMap;
     this.envMap = this._envRT.texture;
     if (this.scene.environment === prev || this.scene.environment == null) this.scene.environment = this.envMap;
@@ -1557,13 +1580,12 @@ export class Environment {
   // Planar reflection: the scene mirrored in the water plane (oblique near plane = the water, so nothing below it
   // reflects), rendered without sea or sky dome into a mip-mapped HDR target; alpha = coverage, so the sea shader keeps
   // its analytic sky + clouds wherever nothing stands above the water. Once per frame, only in marina mode, skipped for
-  // override passes (GTAO normals) and when the camera dips under the surface. Resolution follows the quality preset.
+  // override passes (GTAO normals) and when the camera dips under the surface. Size / content follow setReflections.
   _renderReflection(renderer, scene, camera) {
     const U = this.U;
     if (!this._marina || this._reflBusy || scene.overrideMaterial || this._reflFrame === this._frameId) return;
     this._reflFrame = this._frameId;
-    const q = G.settings?.quality || 'high';
-    const scale = !this.reflections || q === 'low' ? 0 : (q === 'medium' ? 0.28 : q === 'ultra' ? 0.5 : 0.4) * (this.reflScale ?? 1);
+    const scale = this.reflScale;
     const cp = _rv[0].setFromMatrixPosition(camera.matrixWorld);
     if (!scale || cp.y < WATER_Y + 0.05) { U.uReflOn.value = 0; return; }
     if (!this._reflRT) {
@@ -1605,11 +1627,11 @@ export class Environment {
     const prevRT = renderer.getRenderTarget(), xr = renderer.xr.enabled, sAuto = renderer.shadowMap.autoUpdate, sNeed = renderer.shadowMap.needsUpdate;
     renderer.getClearColor(_rCol); const ca = renderer.getClearAlpha();
     // What the water mirrors: the level, hulls / piles / fenders / boats / rails (props) and the near dock kit. Far
-    // scenery comes from the baked far-reflection cube; below ultra the squid kids, FX particles, lamp posts, palms,
-    // flags, light glows and spinners stay out too — they are most of the pass's draw calls (its real cost is CPU:
-    // ~50 µs per draw) and all but vanish in a wave-broken reflection.
+    // scenery comes from the baked far-reflection cube; unless reflActors (high reflections) the squid kids, FX
+    // particles, lamp posts, palms, flags, light glows and spinners stay out too — they are most of the pass's draw calls
+    // (its real cost is CPU: ~50 µs per draw) and all but vanish in a wave-broken reflection.
     const hide = [this.sea, this.sky, this.lhBeam, this.city, this.terrain, this.staticScenery, this.ferris, this.trees, this.sailInst, this.gullInst];
-    if (q !== 'ultra') {
+    if (!this.reflActors) {
       for (const a of G.actors || []) if (a.character && a.character.root) hide.push(a.character.root);
       hide.push(...this._reflSkips(scene));
     }
@@ -1664,7 +1686,9 @@ export class Environment {
       r.shadowMap.autoUpdate = false; r.shadowMap.needsUpdate = !this.sun.shadow.map;
       r.autoClear = true;
       r.setClearColor(0x000000, 0);
+      r.getContext().flush();
       this._farCam.update(r, this.scene);
+      r.getContext().flush();   // six cube faces of the far scenery: their own GPU batch (see _bakeClouds)
     } finally {
       for (const o of hidden) o.visible = true;
       r.setClearColor(cc, ca); r.autoClear = ac; r.setRenderTarget(prevRT);
@@ -1673,7 +1697,7 @@ export class Environment {
     U.uFarOn.value = 1;
   }
 
-  // Scene parts left out of the planar reflection below ultra (cached per prop build): FX, decor, small prop batches.
+  // Scene parts left out of the planar reflection without reflActors (cached per prop build): FX, decor, small props.
   _reflSkips(scene) {
     const props = scene.children.find((o) => o.name === 'props');
     const key = scene.children.length + ':' + (props ? props.uuid + props.children.length : '-');

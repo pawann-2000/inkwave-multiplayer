@@ -23,17 +23,22 @@
 //      onSplat(center, radius, team, seed, kind, stretch|null, stretchAmt, credit) — optional hook, called for every
 //        gameplay splat (not cosmetic, not `remote`) that touched a face: online play broadcasts them (netmatch.js)
 //      speck(center, radius, team, seed)  — cosmetic micro-splat (landing droplets), GPU only
-//      ripple(pos, amp, wavelength, speed, life) · setView(camPos) · flush(dt) · sample/sampleWorld/coverage/regionStats
+//      ripple(pos, amp, wavelength, speed, life) · setView(camPos, camera) · setQuality({ animDist, animHalfRate })
+//      flush(dt) · sample/sampleWorld/coverage/regionStats
 // kind: 'shot' 'line' 'blast' 'bomb' 'trail' 'drop' 'roll' 'speck' (inferred from radius/stretch when omitted;
 //       'roll' needs `stretch` = the roll direction and paints a straight-edged band segment instead of a blob)
 import * as THREE from 'three';
 
 const MAX_QUADS = 6000;
 const RIP_N = 24;
+const DRY_EVERY = 0.2;   // s between drying passes (each subtracts the ≈ 8/255 wetness accrued since the last)
+const MIP_EVERY = 2;     // flushes between mip-chain rebuilds (the base level is always current; distant mips lag a frame)
 const _rel = new THREE.Vector3();
+const _frustum = new THREE.Frustum(), _pv = new THREE.Matrix4(), _sph = new THREE.Sphere();
 
 const K = { shot: 0, line: 1, blast: 2, bomb: 3, trail: 4, drop: 5, roll: 6, speck: 7 };
 const K_SHOT = 0, K_LINE = 1, K_BLAST = 2, K_BOMB = 3, K_TRAIL = 4, K_DROP = 5, K_ROLL = 6, K_SPECK = 7;
+const K_FILL = 8;   // internal: one gameplay cell as a flat, dry square (restore after a WebGL context loss)
 // quad half-extent in footprint radii (satellites / spatter reach) and the extra reach below wall splats (drips)
 const REACH = [2.45, 2.1, 2.7, 2.75, 2.3, 1.9, 1.25, 1.35];
 const DRIP_REACH = 3.9;
@@ -125,6 +130,10 @@ void main() {
       float wv = r * (0.03 * sin(q.x / r * 9.0 + seed * 30.0) + 0.018 * sin(q.x / r * 23.0 + seed * 11.0));
       vec2 dq = abs(q) - vec2(r * ${BAND_L} * grow, r * ${BAND_W} + wv);
       sd = length(max(dq, 0.0)) + min(max(dq.x, dq.y), 0.0) - r * ${BAND_R};
+    } else if (kind > 7.5) {
+      // a gameplay cell, padded so neighbouring cells join without a seam
+      vec2 q = abs(p0) - vec2(r + 1.5 * tx);
+      sd = max(q.x, q.y);
     } else if (kind > 6.5) {
       sd = length(p) - r * grow * (1.0 + 0.12 * sin(3.0 * atan(p.y, p.x) + seed * 20.0));
     } else {
@@ -210,7 +219,7 @@ void main() {
   float fw = max(fwidth(sd), 1e-5);
   float a = 1.0 - smoothstep(-1.5 * fw, 1.5 * fw, sd);
   if (a <= 0.002) discard;
-  gl_FragColor = vec4(team, 1.0, hsh(seed * 1.73), a);   // premultiplied by the blend: team share, wet, tone
+  gl_FragColor = vec4(team, kind > 7.5 ? 0.0 : 1.0, hsh(seed * 1.73), a);   // premultiplied by the blend: team share, wet, tone
 }`;
 
 export class PaintSystem {
@@ -228,6 +237,12 @@ export class PaintSystem {
     this.clock = 0;
     this.frame = 0;
     this.viewPos = null;       // camera position (setView) — ripples far from it are skipped / evicted first
+    this.viewCam = null;       // camera (setView) — splats off screen or farther than animDist land without animating
+    this.animDist = 40;        // m: splats spread / drip visibly only this close to the camera (setQuality)
+    this.animHalfRate = false; // redraw spreading splats every other frame (low effects)
+    this._frustumFrame = -1;
+    this._mipFrame = -MIP_EVERY;
+    this._mipDirty = false;
     this.onSplat = null;       // online: gameplay-splat hook (see the API notes above)
     // ripple table read by the level shader (inkShading.js): xyz + birth (paint clock) · amp, wavelength, speed, life
     this.rip = new Float32Array(RIP_N * 4);
@@ -368,6 +383,7 @@ export class PaintSystem {
     r.clear(true, false, false);
     r.setRenderTarget(prev);
     r.setClearColor(cc, ca);
+    this._mipDirty = true; this._mipFrame = -MIP_EVERY;   // the next flush rebuilds the (now stale) mip chain
     this.grid.fill(0);
     this.counts[0] = this.counts[1] = 0;
     this.quads = 0;
@@ -377,8 +393,56 @@ export class PaintSystem {
     this.version++;
   }
 
-  // Camera position for ripple priorities (fxHooks calls it every frame; the vector is kept by reference).
-  setView(pos) { this.viewPos = pos; }
+  // After a WebGL context loss the atlas pixels are gone but the gameplay grid is not: repaint every inked cell as a
+  // flat, dry square. Splat outlines, drips and specks are lost; the turf everyone plays on is exact.
+  restore() {
+    const r = this.renderer, prev = r.getRenderTarget();
+    const cc = r.getClearColor(new THREE.Color()), ca = r.getClearAlpha();
+    r.setRenderTarget(this.rt);
+    r.setClearColor(0x000000, 0);
+    r.clear(true, false, false);
+    r.setRenderTarget(prev);
+    r.setClearColor(cc, ca);
+    this.growing.length = 0;
+    this.quads = 0;
+    let n = 0;
+    for (const f of this.paintFaces) {
+      const hw = Math.max(f.cu, f.cv) * 0.5;
+      for (let j = 0; j < f.nv; j++) for (let i = 0; i < f.nu; i++) {
+        const v = this.grid[f.grid + j * f.nu + i];
+        if (!v) continue;
+        const lu = (i + 0.5) * f.cu, lv = (j + 0.5) * f.cv, e = hw * 1.3;
+        this._pushQuad(f, lu - e, lu + e, lv - e, lv + e, lu, lv, 0, hw, v - 1, 0.37, K_FILL, 0, 0, 0, 3, 1, 0);   // one tone: no cell pattern
+        n++;
+      }
+    }
+    this._mipDirty = true;
+    this._drawQuads(true);
+    return n;
+  }
+
+  // Camera position for ripple priorities + the camera whose view decides which splats animate (fxHooks; both kept by
+  // reference).
+  setView(pos, camera = null) { this.viewPos = pos; this.viewCam = camera; }
+
+  // Graphics settings (effects level): animation distance + half-rate redraw of spreading splats.
+  setQuality({ animDist = 40, animHalfRate = false } = {}) { this.animDist = animDist; this.animHalfRate = !!animHalfRate; }
+
+  // Spreading and wall drips are redrawn every frame while they run (the whole footprint, with the full splat shader):
+  // with a few hundred splats in flight that dominated the GPU on weak machines. Only splats the player can see
+  // animate — near the camera and inside its view; the rest land in their final shape at once (the same ink, drawn once).
+  _animates(center, radius, kind) {
+    const cam = this.viewCam, vp = this.viewPos;
+    if (!cam || !vp) return true;
+    const dx = center.x - vp.x, dy = center.y - vp.y, dz = center.z - vp.z;
+    if (dx * dx + dy * dy + dz * dz > this.animDist * this.animDist) return false;
+    if (this._frustumFrame !== this.frame) {
+      this._frustumFrame = this.frame;
+      _frustum.setFromProjectionMatrix(_pv.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse));
+    }
+    _sph.center.copy(center); _sph.radius = radius * (REACH[kind] + (kind === K_SPECK ? 0 : DRIP_REACH));
+    return _frustum.intersectsSphere(_sph);
+  }
 
   _kind(opts, radius, st, sAmt) {
     if (opts.kind !== undefined) { const k = K[opts.kind]; if (k !== undefined && (k !== K_ROLL || st)) return k; }
@@ -455,7 +519,7 @@ export class PaintSystem {
         dripDur: drips ? 1.1 + Math.min(2.2, radius * 1.5) : 0,
         cx: center.x, cy: center.y, cz: center.z,
       };
-      if (opts.instant) this._emitGrowth(g, 3, 1, false);
+      if (opts.instant || !this._animates(center, radius, kind)) this._emitGrowth(g, 3, 1, false);
       else this.growing.push(g);
       if (!cosmetic && radius >= 0.15 && !this._rippledNear(center, radius)) {
         // a ripple runs out across the wet ink from the impact (one per cluster: a roller stroke or a burst of trail
@@ -601,6 +665,7 @@ export class PaintSystem {
   flush(dt = 1 / 60) {
     this.clock += dt;
     this.frame++;
+    const redraw = !this.animHalfRate || (this.frame & 1) === 0;
     for (let i = 0; i < this.growing.length; i++) {
       const g = this.growing[i];
       g.age += dt;
@@ -613,23 +678,26 @@ export class PaintSystem {
         this.growing[i] = this.growing[this.growing.length - 1]; this.growing.pop(); i--;
         continue;
       }
-      this._emitGrowth(g, Math.min(tn, 3), dT, bodyDone);
+      if (redraw) this._emitGrowth(g, Math.min(tn, 3), dT, bodyDone);
     }
-    // drying: 1/255 of wetness every 1/40 s (≈ 6.4 s from landing to dry), applied in steps of ≥ 2
+    // drying: 1/255 of wetness per 1/40 s (≈ 6.4 s from landing to dry), applied every DRY_EVERY s — each pass covers
+    // the whole used atlas, so fewer, larger steps (≈ 8/255: invisible in the gloss) cost a quarter of the old 20 Hz
     this._dryAcc += dt;
-    const n = Math.floor(this._dryAcc * 40);
-    if (n >= 2) {
-      const k = Math.min(n, 12);
+    if (this._dryAcc >= DRY_EVERY) {
+      const k = Math.min(Math.floor(this._dryAcc * 40), 12);
       this._dryAcc -= k / 40;
       this._dryU.uDry.value = k / 255;
       this.dryMesh.visible = true;
     }
-    this._drawQuads();
+    const mips = this.frame - this._mipFrame >= MIP_EVERY;
+    if (this.quads || this.dryMesh.visible) this._drawQuads(mips);
+    else if (mips && this._mipDirty) this._drawQuads(true);   // nothing new, but earlier draws skipped the mip rebuild
     this.dryMesh.visible = false;
   }
 
-  _drawQuads() {
-    if (!this.quads && !this.dryMesh.visible) return;
+  // mips: rebuild the atlas mip chain after this draw (else it is left for a later flush — see MIP_EVERY)
+  _drawQuads(mips = false) {
+    if (!this.quads && !this.dryMesh.visible && !(mips && this._mipDirty)) return;
     const g = this.geo, n = this.quads * 4;
     if (n) {
       for (const name of ['aPos', 'aLocal', 'aSplat', 'aStretch', 'aGrow']) {
@@ -643,10 +711,13 @@ export class PaintSystem {
     const prev = r.getRenderTarget();
     const ac = r.autoClear;
     r.autoClear = false;
-    r.setRenderTarget(this.rt);
+    r.setRenderTarget(this.rt);   // (re)allocation, if any, happens here — with the full mip chain
+    this.rt.texture.generateMipmaps = mips;
     r.render(this.scene, this.cam);
+    this.rt.texture.generateMipmaps = true;
     r.setRenderTarget(prev);
     r.autoClear = ac;
+    if (mips) { this._mipDirty = false; this._mipFrame = this.frame; } else this._mipDirty = true;
     this.quads = 0;
     this.dryMesh.visible = false;
   }

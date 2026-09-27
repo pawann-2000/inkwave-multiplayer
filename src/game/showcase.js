@@ -1701,7 +1701,7 @@ export class Showcase {
       if (this._rt) { this._rt.dispose(); this._rt = null; }
       return b;
     }
-    if (!this._rt) this._rt = new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, samples: (G.post?.q?.msaa ?? 4) > 0 ? 4 : 0 });
+    if (!this._rt) this._rt = new THREE.WebGLRenderTarget(w, h, { type: THREE.HalfFloatType, samples: (G.post?.p?.msaa ?? 4) > 0 ? 4 : 0 });
     else if (this._rt.width !== w || this._rt.height !== h) this._rt.setSize(w, h);
     return this._rt;
   }

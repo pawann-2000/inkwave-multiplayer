@@ -3,8 +3,9 @@ import * as THREE from 'three';
 import { G, on, emit, clamp, damp } from './core/ctx.js';
 import { Renderer } from './core/renderer.js';
 import { Input } from './core/input.js';
+import { resolveGfx, migrateGfxSettings, gpuInfo, gpuTier, TIER_RUNG, AUTO_LADDER, AutoGovernor, GFX_KEYS } from './core/gfx.js';
 import { mapTheme,
-  DEFAULT_SETTINGS, QUALITY, TEAM_PALETTES, COLORBLIND_PALETTE, TEAM_NAMES, WEAPONS, WEAPON_ORDER, SUB, SPECIALS,
+  DEFAULT_SETTINGS, TEAM_PALETTES, COLORBLIND_PALETTE, TEAM_NAMES, WEAPONS, WEAPON_ORDER, SUB, SPECIALS,
   MAPS, DIFFICULTY, PLAYER, PROGRESSION, VERSION, MATCH,
 } from './config.js';
 import { Level } from './world/level.js';
@@ -33,9 +34,21 @@ const NET_OPTS = params.get('net') === 'local'
   ? { local: true, lag: Math.min(1000, +params.get('lag') || 0), jitter: Math.min(1000, +params.get('jitter') || 0) }
   : {};
 const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
+// The display's frame interval (s): the shortest of ~16 animation-frame gaps while little else runs. Delays only ever
+// lengthen a gap, so the minimum is the vsync period. Hidden tab / no frames → 60 Hz.
+function measureRefresh(n = 16) {
+  return new Promise((resolve) => {
+    let last = 0, k = 0, best = Infinity;
+    const done = () => { clearTimeout(to); resolve(best >= 1 / 250 && best <= 1 / 24 ? best : 1 / 60); };
+    const to = setTimeout(done, 1500);
+    const f = (t) => { if (last) best = Math.min(best, (t - last) / 1000); last = t; if (++k <= n) requestAnimationFrame(f); else done(); };
+    requestAnimationFrame(f);
+  });
+}
 
 // ------------------------------------------------------------------------------------------ persistence
 function loadJSON(key, def) { try { const v = JSON.parse(localStorage.getItem(key)); return v ? { ...def, ...v } : { ...def }; } catch { return { ...def }; } }
+function loadRaw(key) { try { return JSON.parse(localStorage.getItem(key)); } catch { return null; } }
 function saveJSON(key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } catch { /* private mode */ } }
 const DEFAULT_PROFILE = { name: 'Player', level: 1, xp: 0, wins: 0, matches: 0, totalTurf: 0, weapon: 'shooter' };
 
@@ -51,11 +64,15 @@ async function loadModule(path, stubName) {
 class Game {
   async boot() {
     const t0 = performance.now();
+    const refresh = measureRefresh();   // display refresh, while the page is still quiet (Auto graphics' fps target)
     // real top-down thumbnails for the stage cards, generated from each layout's geometry
     for (const m of MAPS) { try { m.thumb = layoutThumbSVG(MAP_LAYOUTS[m.layout || m.id], m.theme); } catch (e) { console.warn('thumb', m.id, e); } }
+    const rawSettings = loadRaw('inkwave.settings');
     this.settings = G.settings = loadJSON('inkwave.settings', DEFAULT_SETTINGS);
+    let migrated = migrateGfxSettings(this.settings, rawSettings);   // v2 graphics: four tiers → presets + knobs + Auto
     // v1.1: fov became horizontal — migrate old vertical values once
-    if (this.settings.fovMode !== 'h') { this.settings.fov = DEFAULT_SETTINGS.fov; this.settings.fovMode = 'h'; saveJSON('inkwave.settings', this.settings); }
+    if (this.settings.fovMode !== 'h') { this.settings.fov = DEFAULT_SETTINGS.fov; this.settings.fovMode = 'h'; migrated = true; }
+    if (migrated) saveJSON('inkwave.settings', this.settings);
     this.profile = loadJSON('inkwave.profile', DEFAULT_PROFILE);
     const app = document.getElementById('app');
     this.uiRoot = document.getElementById('ui-root');
@@ -96,9 +113,12 @@ class Game {
     const progress = async (p, label) => { this.bootMarks.push([label, Math.round(performance.now() - t0)]); this.menus?.setLoading(p, label); await nextFrame(); };
     await progress(0.05, 'Mixing ink…');
 
-    // renderer / scene
-    this.R = new Renderer(app, this.settings);
+    // renderer / scene (graphics profile: Auto needs the GPU's name, so the renderer starts on a provisional one)
+    this.gfx = G.gfx = resolveGfx(this.settings, TIER_RUNG.medium);
+    this.R = new Renderer(app, this.gfx);
     G.renderer = this.R.renderer;
+    await this._initGfx(refresh);
+    this._initContextRecovery();
     const scene = (G.scene = new THREE.Scene());
     const camera = (G.camera = new THREE.PerspectiveCamera(this.settings.fov, innerWidth / innerHeight, 0.15, 6500));
     camera.position.set(0, 40, -60);
@@ -127,16 +147,13 @@ class Game {
     const map = MAPS.find((m) => m.id === pm) || MAPS[0];
     this.time = params.get('time') === 'dusk' || params.get('map') === 'sunset' ? 'dusk' : (this.settings.timeOfDay === 'dusk' ? 'dusk' : 'day');
     this.theme = mapTheme(map, this.time);
-    const q = QUALITY[this.settings.quality] || QUALITY.high;
+    const gp = this.gfx;
     this.murals = await createMuralTexture();
-    try {
-      const { createTextureLibrary } = await import('./world/texlib.js');
-      this.texlib = await createTextureLibrary(G.renderer, { size: q.paintAtlas >= 4096 ? 512 : 256 });
-    } catch (e) { console.error('[inkwave] texture library failed — procedural fallback', e); this.texlib = null; }
     await this._buildWorld(map);
     await progress(0.4, 'Filling the harbor…');
     const B = G.level.bounds;
-    G.env = new envMod.Environment(G.renderer, scene, { bounds: B, theme: this.theme, shadowSize: q.shadowSize, footprint: this._footprint(G.level) });
+    G.env = new envMod.Environment(G.renderer, scene, { bounds: B, theme: this.theme, shadowSize: gp.shadowSize || 4096, shadowSoft: gp.shadowSoft, footprint: this._footprint(G.level) });
+    G.env.setReflections?.(gp.reflScale, gp.reflActors);
     if (G.env.envMap) scene.environment = G.env.envMap;
     // lighting balance: less omnidirectional sky flood, more directional sky/ground fill → surfaces keep their form
     scene.environmentIntensity = 0.66;
@@ -144,7 +161,7 @@ class Game {
     if (G.env.hemi) G.env.hemi.intensity = Math.max(G.env.hemi.intensity, 0.38);
     await progress(0.55, 'Teaching squids to swim…');
     G.projectiles = new Projectiles(scene);
-    G.fx = new fxMod.FX(scene, { quality: q });
+    G.fx = new fxMod.FX(scene, { quality: gp.particles });
     G.fx.setLighting?.(G.env.getSkyColors?.());
     this._applyNight();
     G.fx.setCollider?.((from, to) => { const h = G.physics.segment(from, to, this._fxHit || (this._fxHit = new Hit()), true); return h.hit ? { point: h.point, normal: h.normal } : null; });
@@ -209,24 +226,35 @@ class Game {
     };
   }
 
-  // Build (or rebuild) everything that depends on the stage layout: level, collision, paint atlas, surface material,
-  // decor, navigation graph and minimap. Environment/FX/projectiles persist across stages.
-  async _buildWorld(map) {
+  // Build (or rebuild) everything that depends on the stage layout or on the world-detail setting: level, collision,
+  // paint atlas, surface material + its texture library, decor, navigation graph and minimap. Environment / FX /
+  // projectiles persist across stages. force: rebuild the same layout (world detail changed).
+  async _buildWorld(map, force = false) {
     const scene = G.scene;
     const layoutId = map.layout || map.id;
-    if (this.layoutId === layoutId) { this.mapDef = map; return; }
+    if (!force && this.layoutId === layoutId) { this.mapDef = map; return; }
     if (this.levelMesh) { scene.remove(this.levelMesh, this.grateMesh); this.levelMesh.geometry.dispose(); this.grateMesh?.geometry.dispose(); this.levelMat.dispose(); this.grateMat?.dispose(); }
     if (this.decor) { scene.remove(this.decor.group); }
     if (this.props) { this.props.dispose?.(); this.props = null; }
     G.paint?.dispose();
     this.layoutId = layoutId;
     this.mapDef = map;
-    const q = QUALITY[this.settings.quality] || QUALITY.high;
+    const gp = this.gfx;
+    this._builtDetail = gp.detail;
+    // texture library for the surface material, baked at this detail's size
+    if (!this.texlib || this.texlib.size !== gp.texlibSize) {
+      this.texlib?.dispose();
+      this.texlib = null;
+      try {
+        const { createTextureLibrary } = await import('./world/texlib.js');
+        this.texlib = await createTextureLibrary(G.renderer, { size: gp.texlibSize });
+      } catch (e) { console.error('[inkwave] texture library failed — procedural fallback', e); this.texlib = null; }
+    }
     // set dressing first: solid props hand back collision boxes that become part of the level (physics, nav, paint)
     const colliders = [];
     if (this.PropKit) {
       try {
-        this.props = new this.PropKit(scene, { castShadow: true, quality: this.settings.quality });
+        this.props = new this.PropKit(scene, { castShadow: true, quality: gp.detail });
         for (const it of dressingFor(layoutId)) {
           const r = this.props.add(it.type, it);
           if (r && r.colliders) colliders.push(...r.colliders);
@@ -237,15 +265,16 @@ class Game {
     const level = (G.level = new Level(MAP_LAYOUTS[layoutId], colliders));
     G.physics = new Physics(level);
     const lightmap = await this._loadLightmap(level, layoutId);
-    G.paint = new PaintSystem(G.renderer, level, { atlasSize: q.paintAtlas, maxDensity: q.paintAtlas >= 4096 ? 30 : 18 });
-    this.levelMat = createLevelMaterial(G.paint.texture, G.paint.size, this.murals, { lightmap, texlib: this.texlib });
+    G.paint = new PaintSystem(G.renderer, level, { atlasSize: gp.paintAtlas, maxDensity: gp.paintDensity });
+    G.paint.setQuality({ animDist: gp.inkAnimDist, animHalfRate: gp.inkAnimHalfRate });
+    this.levelMat = createLevelMaterial(G.paint.texture, G.paint.size, this.murals, { lightmap, texlib: this.texlib, lite: gp.levelLite });
     (this.swimWake || (this.swimWake = new SwimWake())).reset();
     this.levelMesh = new THREE.Mesh(level.buildGeometry(G.paint.size), this.levelMat);
     this.levelMesh.castShadow = true; this.levelMesh.receiveShadow = true;
     this.levelMesh.name = 'level';
     scene.add(this.levelMesh);
     // grates: same surface shader, cut-out holes, no ink (they cast no shadow; the mesh is too fine for the shadow map)
-    this.grateMat = createLevelMaterial(G.paint.texture, G.paint.size, this.murals, { grate: true, lightmap, texlib: this.texlib });
+    this.grateMat = createLevelMaterial(G.paint.texture, G.paint.size, this.murals, { grate: true, lightmap, texlib: this.texlib, lite: gp.levelLite });
     const gg = level.buildGeometry(G.paint.size, (b) => b.grate);
     this.grateMesh = new THREE.Mesh(gg, this.grateMat);
     this.grateMesh.receiveShadow = true; this.grateMesh.visible = gg.index.count > 0;
@@ -326,7 +355,8 @@ class Game {
     const api = (this.api = {
       version: VERSION,
       weapons: WEAPONS, weaponOrder: WEAPON_ORDER, specials: SPECIALS, sub: SUB.bomb, maps: MAPS, difficulties: DIFFICULTY,
-      getSettings: () => ({ ...self.settings }),
+      getSettings: () => ({ ...self.settings, ...(self.gfx && self.gfx.knobs) }),   // knobs as in effect (preset / Auto level)
+      gfxStatus: () => self.gfxStatus(),
       setSettings: (partial) => self._setSettings(partial),
       getProfile: () => {
         const p = self.profile;
@@ -367,13 +397,111 @@ class Game {
   }
 
   _setSettings(partial) {
-    Object.assign(this.settings, partial);
-    saveJSON('inkwave.settings', this.settings);
-    if ('quality' in partial || 'shadows' in partial || 'bloom' in partial) this.R?.applySettings(this.settings);
+    const s = this.settings;
+    const knobs = Object.keys(partial).filter((k) => GFX_KEYS.includes(k));
+    // one knob of a preset (or of Auto's current level) edited: the rest keep their current values → Custom
+    if (knobs.length && !('quality' in partial) && s.quality !== 'custom') { Object.assign(s, this.gfx.knobs); s.quality = 'custom'; }
+    Object.assign(s, partial);
+    saveJSON('inkwave.settings', s);
+    if ('quality' in partial || knobs.length || 'fpsLimit' in partial || 'gfxDynRes' in partial) this._applyGfx();
     if ('master' in partial || 'music' in partial || 'sfx' in partial) this._applyAudioVolumes();
     if ('colorblind' in partial && G.mode !== 'match') this._setPalette(this._pickPalette());
   }
   _applyAudioVolumes() { G.audio?.setVolumes?.({ master: this.settings.master, music: this.settings.music, sfx: this.settings.sfx }); }
+
+  // ---------------------------------------------------------------------------------------- graphics
+  // Auto graphics: a first guess from the GPU's name (plus memory / cores), then the governor (gfx.js) settles on a
+  // ladder level from real match frame rates. The level is remembered per GPU, so it is only learned once.
+  async _initGfx(refresh) {
+    const gl = this.R.renderer.getContext();
+    this.gpu = gpuInfo(gl);
+    const coarse = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches && !matchMedia('(pointer: fine)').matches;
+    this.gpu.tier = gpuTier(this.gpu.renderer, { deviceMemory: navigator.deviceMemory, cores: navigator.hardwareConcurrency, mobile: coarse });
+    const saved = loadRaw('inkwave.gfxAuto');
+    const known = saved && saved.gpu === this.gpu.renderer && Number.isInteger(saved.rung);
+    this._gov = new AutoGovernor({
+      rung: known ? saved.rung : TIER_RUNG[this.gpu.tier], upAfter: known ? saved.upAfter : 20,
+      limit: this.settings.fpsLimit | 0, refresh: await refresh,
+    });
+    this._applyGfx();
+  }
+
+  // Resolve the settings (+ Auto's level) into a profile and hand it to every consumer. World detail (ink atlas,
+  // surface textures, prop geometry) takes effect at the next stage load (_prepareStage compares _builtDetail).
+  _applyGfx({ fromAuto = false } = {}) {
+    const p = (this.gfx = G.gfx = resolveGfx(this.settings, this._gov ? this._gov.rung : TIER_RUNG.medium));
+    if (!fromAuto) { this.R.dynScale = 1; this._dyn = null; }   // a settings change starts at full resolution again
+    if (this.R.setProfile(p)) this._recompileLit();
+    G.env?.setShadows?.(p.shadowSize, p.shadowSoft);
+    G.env?.setReflections?.(p.reflScale, p.reflActors);
+    G.fx?.setQuality?.(p.particles);
+    G.paint?.setQuality?.({ animDist: p.inkAnimDist, animHalfRate: p.inkAnimHalfRate });
+    if (this._gov) this._gov.limit = this.settings.fpsLimit | 0;
+    this.menus?.refreshSettings?.();
+  }
+
+  // Shadows switched on / off: shaders that sample the shadow map must be rebuilt (three does not track the switch).
+  _recompileLit() {
+    const mark = (o) => { if (!o.material) return; for (const m of Array.isArray(o.material) ? o.material : [o.material]) m.needsUpdate = true; };
+    G.scene?.traverse(mark);
+    this.showcase?.scene?.traverse(mark);
+  }
+
+  // Once per rendered frame: Auto's governor, or (manual presets) the dynamic-resolution nudge.
+  _gfxTick(dt) {
+    const m = this.match;
+    const live = !!(m && !m.attract && m.state === 'playing' && !m.paused && !this.menus?.current && !document.hidden);
+    if (this.settings.quality === 'auto') {
+      if (this._gov.tick(dt, live) >= 0) {
+        this._applyGfx({ fromAuto: true });
+        saveJSON('inkwave.gfxAuto', { gpu: this.gpu.renderer, rung: this._gov.rung, upAfter: this._gov.upAfter });
+      }
+    } else if (this.settings.gfxDynRes !== false) this._dynRes(dt, live);
+  }
+
+  // Weak or overloaded GPUs get reset by their driver (Windows TDR, Linux i915 hang checks): WebGL loses its context.
+  // three.js restores its own state; everything drawn into render targets is gone, so the texture library, the sky /
+  // light-probe / far-reflection bakes and the ink atlas (from the gameplay grid) are redrawn. The sim and online sync
+  // keep running; rendering waits until the shaders have recompiled in the background. A second reset under Auto
+  // steps two levels lighter.
+  _initContextRecovery() {
+    const cv = this.R.renderer.domElement;
+    cv.addEventListener('webglcontextlost', () => {
+      this._gpuLost = true;
+      this._gpuLosses = (this._gpuLosses || 0) + 1;
+      console.warn('[inkwave] WebGL context lost (graphics driver reset) — waiting for the browser to restore it');
+    });
+    cv.addEventListener('webglcontextrestored', () => {
+      this._restoreGpu().catch((e) => { console.error('[inkwave] graphics restore failed', e); this._gpuLost = false; });
+    });
+  }
+  async _restoreGpu() {
+    try { await this.texlib?.rebake?.(); } catch (e) { console.error('[inkwave] texture library rebake', e); }
+    if (G.env?.setTheme) { G.env.setTheme(G.env.theme); if (G.env.envMap) G.scene.environment = G.env.envMap; }
+    const cells = G.paint?.restore?.() ?? 0;
+    try { await G.renderer.compileAsync(G.scene, G.camera); } catch (e) { /* compiles on first draw instead */ }
+    this._gpuLost = false;
+    console.info(`[inkwave] graphics restored after a driver reset (${cells} ink cells repainted)`);
+    const live = this.match && !this.match.attract;
+    if (this.settings.quality === 'auto' && this._gpuLosses >= 2 && this._gov.stepDown(2) >= 0) {
+      this._applyGfx({ fromAuto: true });
+      saveJSON('inkwave.gfxAuto', { gpu: this.gpu.renderer, rung: this._gov.rung, upAfter: this._gov.upAfter });
+      if (live) this.hud?.feed({ text: 'Graphics reset by the driver — Auto lowered the quality', kind: 'info' });
+    } else if (live) this.hud?.feed({ text: this.settings.quality === 'auto' ? 'Graphics reset by the driver — recovered' : 'Graphics reset by the driver — a lower preset may help', kind: 'info' });
+  }
+
+  // Graphics status for the settings screen and debugging.
+  gfxStatus() {
+    const p = this.gfx, g = this._gov;
+    return {
+      preset: p.preset, rung: p.rung, level: p.rung >= 0 ? AUTO_LADDER[p.rung].label : null,
+      base: p.rung >= 0 ? AUTO_LADDER[p.rung].id.split('-')[0].replace('lowest', 'low') : p.preset,   // nearest preset
+      gpu: this.gpu ? this.gpu.name : '', tier: this.gpu ? this.gpu.tier : '', fps: this.fps,
+      target: g ? Math.round(g.target()) : 60, knobs: { ...p.knobs }, pixelRatio: +this.R.pixelRatio().toFixed(3),
+      detailPending: this._builtDetail !== undefined && this._builtDetail !== p.detail,
+    };
+  }
+  gfxState() { const st = this.gfxStatus(); return `${st.preset}${st.level ? ':' + st.level : ''} pr=${st.pixelRatio}`; }
 
   _onScreen(s) {
     if (!this.showcase) return;
@@ -581,7 +709,8 @@ class Game {
     if (this.match) this.match.dispose();
     G.projectiles.clear(); G.fx.clear?.(); G.paint.clear();
     const map = MAPS.find((m) => m.id === mapId) || MAPS[0];
-    if ((map.layout || map.id) !== this.layoutId) await this._buildWorld(map);
+    // a new layout, or a world-detail change since the last build (ink atlas, surface textures, prop geometry)
+    if ((map.layout || map.id) !== this.layoutId || this._builtDetail !== this.gfx.detail) await this._buildWorld(map, true);
     const theme = mapTheme(map, time);
     this.time = time === 'dusk' ? 'dusk' : 'day';
     if (theme !== this.theme) {
@@ -832,13 +961,21 @@ class Game {
   }
 
   // ---------------------------------------------------------------------------------------- loop
-  _loop() {
-    requestAnimationFrame(() => this._loop());
+  _loop(now) {
+    requestAnimationFrame((t) => this._loop(t));
+    // frame-rate limit: skip display frames until the next slot is due (before the timer, so dt spans rendered frames)
+    const lim = this.settings.fpsLimit | 0;
+    if (lim > 0 && now > 0) {
+      const iv = 1000 / lim, el = now - (this._limitAt || 0);
+      if (el < iv - 1.5) return;   // (display frames arrive with jitter: 1.5 ms early still counts as on time)
+      // advance by whole slots so an early frame never shifts the grid (else 30 fps ran at ~37)
+      this._limitAt = el > iv * 3 ? now : this._limitAt + iv * Math.max(1, Math.floor((el + 1.5) / iv));
+    }
     this.timer.update(); let dt = this.timer.getDelta();
     if (this.frozen || this._bgActive) return;   // (hidden tab online: the background tick drives the frames)
     this.fpsAcc += dt; this.fpsN++;
     if (this.fpsAcc > 0.5) { this.fps = Math.round(this.fpsN / this.fpsAcc); this.fpsAcc = 0; this.fpsN = 0; }
-    this._dynRes(dt);
+    this._gfxTick(dt);
     dt = Math.min(dt, 1 / 24);
     this._frame(dt);
   }
@@ -880,18 +1017,17 @@ class Game {
     try { this._frame(dt); } finally { this._skipRender = false; }
   }
 
-  // keep weaker GPUs playable: when a 4 s window of a live round averages under ~40 fps, drop render density one notch.
-  // Stepping back up needs 12 s of real headroom and happens at most twice, so the image never pumps between sizes
-  // (re-sizing every couple of seconds read as flicker).
-  _dynRes(dt) {
+  // Manual presets with dynamic resolution on: when a 4 s window of a live round averages under ~40 fps, drop render
+  // density one notch (down to 0.75). Stepping back up needs 12 s of real headroom and happens at most twice, so the
+  // image never pumps between sizes (re-sizing every couple of seconds read as flicker). Auto adapts on its own.
+  _dynRes(dt, live) {
     if (dt <= 0 || dt > 0.25) return;
     const d = this._dyn || (this._dyn = { acc: 0, n: 0, t: 0, fast: 0, ups: 0 });
     d.acc += dt; d.n++; d.t += dt;
     if (d.t < 4) return;
     const avg = d.acc / d.n;
     d.acc = 0; d.n = 0; d.t = 0;
-    const m = this.match;
-    if (this.settings.quality === 'ultra' || document.hidden || !m || m.attract || m.state !== 'playing') { d.fast = 0; return; }
+    if (!live) { d.fast = 0; return; }
     const s = this.R.dynScale || 1;
     if (avg > 1 / 40 && s > 0.76) { this.R.setDynamicScale(s - 0.125); d.fast = 0; }
     else if (avg < 1 / 75 && s < 1 && d.ups < 2) { if (++d.fast >= 3) { this.R.setDynamicScale(s + 0.125); d.fast = 0; d.ups++; } }
@@ -964,12 +1100,12 @@ class Game {
     g.uHurt.value = damp(g.uHurt.value, hpK * 0.8, 6, dt);
     if (loc) g.uHurtColor.value.copy(G.teamColors[loc.enemyTeam]);
     // shadows: every frame (half-rate updates made moving shadows — your own, right under the crosshair — judder);
-    // only the low preset halves it
+    // only the low shadow setting halves it
     const sm = G.renderer.shadowMap;
     sm.autoUpdate = false;
     this._frameN = (this._frameN || 0) + 1;
-    if (this.settings.quality !== 'low' || (this._frameN & 1)) sm.needsUpdate = true;
-    if (!this._skipRender) {
+    if (!this.gfx.shadowHalfRate || (this._frameN & 1)) sm.needsUpdate = true;
+    if (!this._skipRender && !this._gpuLost) {
       this.R.render();
       if (this.showcase.mode) sm.needsUpdate = true;
       this.showcase.render();

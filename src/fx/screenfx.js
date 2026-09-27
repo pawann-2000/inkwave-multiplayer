@@ -15,7 +15,6 @@
 import * as THREE from 'three';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { on, G as CTX, clamp, damp, lerp } from '../core/ctx.js';
-import { QUALITY } from '../config.js';
 
 const TAU = Math.PI * 2;
 const _v = new THREE.Vector3(), _v2 = new THREE.Vector3();
@@ -797,10 +796,10 @@ export class ScreenFX {
     if (W !== this._w || H !== this._h) { this._w = W; this._h = H; U.uRes.value.set(W, H); }
     this._aspect = W / Math.max(1, H);
     U.uAspect.value = this._aspect;
-    const q = QUALITY[G.settings?.quality] || QUALITY.high;
-    const taps = q.particles >= 1 ? 8 : q.particles >= 0.7 ? 6 : 5;
+    const gp = G.gfx;   // effects level (gfx.js profile): blur taps + lens-ink buffer size
+    const taps = gp ? gp.screenTaps : 8;
     if (taps !== this.taps) { this.taps = taps; this.mat.defines.TAPS = taps; this.mat.needsUpdate = true; }
-    this.lens.resize(W, H, q.particles >= 1 ? 1 / 3 : 1 / 4);
+    this.lens.resize(W, H, gp ? gp.lensScale : 1 / 3);
 
     // intensity scaling for the intense (motion) effects
     const shake = clamp(G.settings?.cameraShake ?? 1, 0, 1);

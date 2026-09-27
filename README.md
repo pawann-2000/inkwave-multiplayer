@@ -98,17 +98,21 @@ npm run build    # assemble dist/ (game + only the three.js addons it imports)
 
 ## How it works
 
-- **Ink is painted in texture space.** Every paintable face owns a region of one 4K atlas; splats are drawn into it on the GPU while a coarse CPU grid keeps the turf score and gameplay queries in sync. The level shader layers the ink over the surface with its own height, gloss and wetness. See [`src/world/paint.js`](src/world/paint.js) and [`src/world/inkShading.js`](src/world/inkShading.js).
+- **Ink is painted in texture space.** Every paintable face owns a region of one atlas (4K at High world detail, 2K below); splats are drawn into it on the GPU while a coarse CPU grid keeps the turf score and gameplay queries in sync. The level shader layers the ink over the surface with its own height, gloss and wetness. See [`src/world/paint.js`](src/world/paint.js) and [`src/world/inkShading.js`](src/world/inkShading.js).
 - **Stages are data.** A layout is a list of boxes and ramps for one half of the arena; the other half is the 180° rotation, so both teams always get an identical field. Ambient occlusion is baked offline (`tools/bake-ao.mjs`). See [`src/world/maps.js`](src/world/maps.js).
 - **Characters are fully procedural.** Geometry, materials, a 60-bone rig and every animation (locomotion, squid form, weapon poses, secondary motion) are code, driven by a spring-based pose system. See [`docs/RIG.md`](docs/RIG.md).
 - **Systems talk through events.** Weapons, actors and the match emit typed events; effects, HUD and audio subscribe. The contract is documented in [`docs/EVENTS.md`](docs/EVENTS.md) and [`docs/CONTRACTS.md`](docs/CONTRACTS.md).
 - **Deterministic tooling.** The game exposes a freeze/step debug interface so filmstrips, handling measurements and bot simulations are reproducible frame by frame (`tools/film.py`, `tools/measure-handling.mjs`).
 
-Rendering is three.js r186 (vendored, plain ES modules with an import map) with GTAO, bloom and a custom grade pass.
+Rendering is three.js r186 (vendored, plain ES modules with an import map) with GTAO, bloom and a custom grade pass. Graphics
+default to **Auto**: a first guess from the GPU, then an in-match governor that settles on the level the machine holds at
+60 fps. See [`docs/GRAPHICS.md`](docs/GRAPHICS.md) for the options, what each costs and how it was measured.
 
 ## Browser support
 
-Chrome and Edge are the target; Firefox works. Safari runs but is slower. A discrete or recent integrated GPU is recommended for the High preset; the settings menu has Medium and Low tiers.
+Chrome and Edge are the target; Firefox works. Safari runs but is slower. Integrated graphics run well on Auto or Low; High and
+Ultra want a discrete GPU. **Settings → Video / Graphics** has the presets, a render-resolution slider, a frame-rate limit
+and every effect individually (shadows, anti-aliasing, ambient occlusion, bloom, reflections, effects, world detail).
 
 ## Contributing
 

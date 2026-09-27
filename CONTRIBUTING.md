@@ -18,11 +18,11 @@ Open the URL in Chrome, Edge or Firefox. Everything reloads on refresh; there is
 ```bash
 npm run check        # node --check on every module
 npm run smoke        # boots the game headlessly and plays 8 s on autopilot (needs Google Chrome installed)
-npm test             # online-play protocol tests
+npm test             # online-play protocol tests + graphics profiles / Auto governor
 npm run mptest       # if you touched src/net, actor.js, weapons.js, paint.js or match.js: 3 tabs play online
 ```
 
-Keep pull requests focused. If you change gameplay tuning, say what you measured and how (see `tools/measure-handling.mjs` and `tools/film.py` for the deterministic capture helpers).
+Keep pull requests focused. If you change gameplay tuning, say what you measured and how (see `tools/measure-handling.mjs` and `tools/film.py` for the deterministic capture helpers). For rendering changes, measure GPU time with `tools/gfx-bench.mjs` (see docs/GRAPHICS.md).
 
 ## Project map
 
@@ -35,7 +35,7 @@ Keep pull requests focused. If you change gameplay tuning, say what you measured
 | `src/ui` | menus, HUD, map diorama, icons |
 | `src/audio` | procedural sound effects and music |
 | `src/net` | online play: wire protocol + validation, transports, lobby session, in-match sync (docs/NETWORK.md) |
-| `docs` | event contract, module contracts, character rig reference |
+| `docs` | event contract, module contracts, character rig reference, graphics settings + performance |
 | `tools` | dev server, labs, headless capture and measurement scripts, release |
 
 ## Code style

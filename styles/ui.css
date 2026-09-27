@@ -905,6 +905,15 @@ circle.iw-ico-cut { fill: var(--cut, #fff); }
 .iw-pv-chip small { font: 800 calc(var(--u) * .56) / 1 'Rubik', sans-serif; letter-spacing: .1em; text-transform: uppercase; opacity: .65; white-space: nowrap; }
 .iw-pv-chip b { font: 400 calc(var(--u) * .95) / 1 'Titan One', sans-serif; white-space: nowrap; }
 .iw-pv-chip.is-off b { opacity: .45; }
+/* graphics preset: Auto / Custom line over the knobs in effect; single options: a cost ladder + caption */
+.iw-pv-gfxside { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: calc(var(--u) * .4); }
+.iw-pv-gfxside .iw-pv-chips { flex: none; gap: calc(var(--u) * .3); }
+.iw-pv-gfxside .iw-pv-chip { padding: calc(var(--u) * .3) calc(var(--u) * .5); }
+.iw-pv-gfxhead { font: 700 calc(var(--u) * .66) / 1.2 'Rubik', sans-serif; color: rgba(255, 255, 255, .8); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.iw-pv-gfxhead:empty { display: none; }
+.iw-pv-gfxhead b { color: var(--a-light); font-weight: 900; letter-spacing: .08em; }
+.iw-pv--gfx .iw-pv-ladder { flex: 1 1 auto; width: 72%; min-height: 0; }
+.iw-pv-big { font-size: calc(var(--u) * 3.4); line-height: 1; color: var(--a-light); }
 /* shadows / bloom / fps / minimap / shake */
 .iw-pv-shadow { transition: opacity .3s; }
 .iw-pv--shadow:not(.is-on) .iw-pv-shadow { opacity: 0; }

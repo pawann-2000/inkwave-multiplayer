@@ -246,9 +246,13 @@ export const DEFAULT_SETTINGS = {
   padSensitivity: 1.0,
   invertY: false,
   fov: 82,                  // horizontal FOV at 16:9, 65..100
-  quality: 'high',          // 'low' | 'medium' | 'high' | 'ultra'
-  shadows: true,
-  bloom: true,
+  // graphics (src/core/gfx.js): a preset, or 'custom' = the gfx* knobs below (they start as High)
+  quality: 'auto',          // 'auto' | 'low' | 'medium' | 'high' | 'ultra' | 'custom'
+  gfxRes: 1, gfxDensity: 1.5, gfxShadows: 'high', gfxAA: 'msaa4', gfxAO: true, gfxBloom: true,
+  gfxRefl: 'medium', gfxEffects: 'high', gfxDetail: 'high',
+  gfxDynRes: true,          // manual presets: lower the resolution a notch while the frame rate is low (Auto adapts anyway)
+  fpsLimit: 0,              // 0 = the display's refresh rate
+  gfxV: 2,
   cameraShake: 1.0,         // 0..1
   showFps: false,
   master: 0.8, music: 0.6, sfx: 0.85,
@@ -259,13 +263,4 @@ export const DEFAULT_SETTINGS = {
   rumble: 1.0,              // gamepad vibration 0..1 (only while the pad is the last-used device)
   aimAssist: 1.0,           // gamepad aim assist 0..1
   aimAssistMouse: false,    // optional aim assist for mouse
-};
-
-// Quality presets consumed by the renderer + fx.
-export const QUALITY = {
-  // pixelRatio = cap on devicePixelRatio (Retina screens render at up to this density)
-  low:    { pixelRatio: 0.75, shadowSize: 1024, msaa: 0, bloom: false, ao: false, paintAtlas: 2048, particles: 0.4 },
-  medium: { pixelRatio: 1.0,  shadowSize: 2048, msaa: 2, bloom: true,  ao: false, paintAtlas: 2048, particles: 0.7 },
-  high:   { pixelRatio: 1.5,  shadowSize: 4096, msaa: 4, bloom: true,  ao: true,  paintAtlas: 4096, particles: 1.0 },
-  ultra:  { pixelRatio: 2.0,  shadowSize: 4096, msaa: 4, bloom: true,  ao: true,  paintAtlas: 4096, particles: 1.0 },
 };

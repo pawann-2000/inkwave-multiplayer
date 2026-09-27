@@ -13,7 +13,7 @@ import {
   richText, logoMarkup, mapThumb, RULE_ART, weaponIcon, specialIcon,
 } from './ui-icons.js';
 import {
-  GAME_TITLE, GAME_SUBTITLE, VERSION, WEAPONS, WEAPON_ORDER, SPECIALS, SUB, MAPS, DIFFICULTY, MATCH, QUALITY,
+  GAME_TITLE, GAME_SUBTITLE, VERSION, WEAPONS, WEAPON_ORDER, SPECIALS, SUB, MAPS, DIFFICULTY, MATCH,
   DEFAULT_SETTINGS, TEAM_PALETTES, COLORBLIND_PALETTE, PROGRESSION, BOT_NAMES, TEAM_NAMES,
 } from '../config.js';
 import * as LOOK from '../game/character-style.js';
@@ -86,11 +86,22 @@ const SETTINGS_TABS = [
     { key: '_howto', label: 'Controls reference', type: 'link', help: 'Every keyboard, mouse and controller binding in one place.' },
   ] },
   { id: 'video', label: 'Video', icon: 'monitor', rows: [
-    { key: 'quality', label: 'Graphics quality', type: 'seg', options: [['low', 'Low'], ['medium', 'Med'], ['high', 'High'], ['ultra', 'Ultra']], help: 'Resolution scale, shadow detail, anti-aliasing and particle counts.' },
+    { key: 'quality', label: 'Graphics preset', type: 'seg', options: [['auto', 'Auto'], ['low', 'Low'], ['medium', 'Med'], ['high', 'High'], ['ultra', 'Ultra'], ['custom', 'Custom']], help: 'Auto finds the best level your PC holds at 60 fps and keeps adjusting in matches. Changing any Graphics option switches to Custom.' },
+    { key: 'gfxRes', label: 'Render resolution', type: 'slider', min: 0.5, max: 1, step: 0.05, fmt: pctFmt, help: 'How sharp the 3D scene is drawn (menus and HUD stay crisp). Lower is much faster on weak graphics.' },
+    { key: 'gfxDensity', label: 'HiDPI sharpness', type: 'seg', options: [[1, '1×'], [1.5, '1.5×'], [2, '2×']], help: 'On high-density screens (Retina, 4K laptops): pixels drawn per screen point. 1× is fastest.' },
+    { key: 'gfxDynRes', label: 'Dynamic resolution', type: 'toggle', help: 'With a fixed preset: lowers the resolution a notch while the frame rate drops in a match. Auto always adapts.' },
+    { key: 'fpsLimit', label: 'Frame rate limit', type: 'seg', options: [[30, '30'], [60, '60'], [120, '120'], [0, 'Off']], help: 'Caps frames per second. 30 or 60 keeps laptops cooler and quieter; Off follows your display.' },
     { key: 'fov', label: 'Field of view', type: 'slider', min: 65, max: 100, step: 1, fmt: (v) => Math.round(v) + '°', help: 'Wider shows more of the turf around you.' },
-    { key: 'shadows', label: 'Shadows', type: 'toggle', help: 'Soft sun shadows. Turn off for extra speed on older machines.' },
-    { key: 'bloom', label: 'Bloom glow', type: 'toggle', help: 'A soft glow around bright ink and specials.' },
     { key: 'showFps', label: 'Show FPS counter', type: 'toggle', help: 'Displays frames per second in the corner during matches.' },
+  ] },
+  { id: 'graphics', label: 'Graphics', icon: 'sparkle', rows: [
+    { key: 'gfxShadows', label: 'Shadows', type: 'seg', options: [['off', 'Off'], ['low', 'Low'], ['medium', 'Med'], ['high', 'High']], help: 'Sun shadow detail. Low redraws them every other frame; Off is fastest.' },
+    { key: 'gfxAA', label: 'Anti-aliasing', type: 'seg', options: [['off', 'Off'], ['fxaa', 'FXAA'], ['msaa2', '2×'], ['msaa4', '4×']], help: 'Smooths jagged edges. FXAA is nearly free; 2× and 4× MSAA are crisper but costly on integrated graphics.' },
+    { key: 'gfxAO', label: 'Ambient occlusion', type: 'toggle', help: 'Soft contact shadows in corners and under squid kids. The most expensive effect.' },
+    { key: 'gfxBloom', label: 'Bloom glow', type: 'toggle', help: 'A soft glow around bright ink and specials.' },
+    { key: 'gfxRefl', label: 'Water reflections', type: 'seg', options: [['off', 'Off'], ['low', 'Low'], ['medium', 'Med'], ['high', 'High']], help: 'Mirror reflections in the harbor water (Halyard). High reflects squid kids too.' },
+    { key: 'gfxEffects', label: 'Effects', type: 'seg', options: [['low', 'Low'], ['medium', 'Med'], ['high', 'High']], help: 'Ink particles, screen effects, and how far away splats animate.' },
+    { key: 'gfxDetail', label: 'World detail', type: 'seg', options: [['low', 'Low'], ['medium', 'Med'], ['high', 'High']], help: 'Ink and surface texture resolution and prop detail. Applies from the next match.' },
   ] },
   { id: 'audio', label: 'Audio', icon: 'speaker', rows: [
     { key: 'master', label: 'Master volume', type: 'slider', min: 0, max: 1, step: 0.05, fmt: pctFmt, help: 'Overall loudness of everything.' },
@@ -108,7 +119,8 @@ const SETTINGS_TABS = [
 ];
 const TAB_BLURB = {
   controls: 'Look speed, invert, aim assist and the full control reference.',
-  video: 'Quality tier, field of view and screen effects.',
+  video: 'Graphics preset (Auto adapts to your PC), resolution, frame rate and field of view.',
+  graphics: 'Fine-tune each effect. Changing any of them switches the preset to Custom.',
   audio: 'Master, music and sound-effect levels.',
   gameplay: 'Shake, vibration, colour-safe inks, minimap and match defaults.',
 };
@@ -314,6 +326,9 @@ export class Menus {
     try { s = this.api.getSettings && this.api.getSettings(); } catch (e) { s = null; }
     return { ...DEFAULT_SETTINGS, ...(s || {}) };
   }
+  // The settings screen re-reads every row (graphics changed from outside it: Auto moved, a preset applied).
+  refreshSettings() { if (this._scr && this._scr.refresh) safeCall(() => this._scr.refresh()); }
+
   _setSetting(key, value) {
     safeCall(() => this.api.setSettings && this.api.setSettings({ [key]: value }));
     if (key === 'colorblind' && !this._accentExternal) this._applyAccent();
@@ -1746,14 +1761,25 @@ export class Menus {
       const o = (r.options || []).find((x) => x[0] === v);
       return o ? o[1] : String(v);
     };
-    const fmtVal = (r, v) => (!r ? '' : r.type === 'slider' ? r.fmt(+v) : r.type === 'toggle' ? (v ? 'ON' : 'OFF') : r.type === 'seg' ? optLabel(r, v).toUpperCase() : '');
+    const fmtVal = (r, v) => {
+      if (!r) return '';
+      if (r.key === 'quality' && v === 'auto') { const st = this.api.gfxStatus?.(); return st && st.level ? `AUTO · ${st.level.toUpperCase()}` : 'AUTO'; }
+      return r.type === 'slider' ? r.fmt(+v) : r.type === 'toggle' ? (v ? 'ON' : 'OFF') : r.type === 'seg' ? optLabel(r, v).toUpperCase() : '';
+    };
+    // settings that change others: a preset rewrites the graphics options, an option turns the preset to Custom, and
+    // Auto moves on its own — every row (and the open preview) re-reads the settings in effect
+    const refreshAll = (except) => {
+      const s = this._settings();
+      for (const [k, c] of controls) if (k !== except) c.refresh(s[k]);
+      if (P.key && P.key !== except && P.cur && rowDef(P.key)) { safeCall(() => P.cur.set(s[P.key], s)); pvVal.textContent = fmtVal(rowDef(P.key), s[P.key]); }
+    };
     const showPreview = (key, { label, help, tab } = {}) => {
       if (P.key === key) return;
       P.key = key;
       const s = this._settings();
       const r = rowDef(key);
       const pv = createPreview(key, {
-        value: r ? s[key] : null, settings: s, qualityTable: QUALITY, palettes: TEAM_PALETTES, cbPalette: COLORBLIND_PALETTE,
+        value: r ? s[key] : null, settings: s, gfxStatus: () => this.api.gfxStatus?.(), palettes: TEAM_PALETTES, cbPalette: COLORBLIND_PALETTE,
         diffs: this._diffs(), diffInfo: DIFF_INFO, durations: MATCH.durations || [90, 180], tab,
       });
       // retire every preview still on stage (fast focus moves can queue several)
@@ -1857,8 +1883,10 @@ export class Menus {
         else if (f.dataset.nav === 'tab') { const t = SETTINGS_TABS[tabBtns.indexOf(f)]; if (t) showPreview('_tab_' + t.id, { label: t.label, help: TAB_BLURB[t.id], tab: t }); }
         else if (f.dataset.id === 'reset') showPreview('_reset', { label: 'Reset', help: 'Restore every setting to its original value.' });
       },
+      refresh: () => refreshAll(null),
       onSetting: (key, value) => {
         savedPulse();
+        refreshAll(key);
         if (P.key === key && P.cur) {
           const s = this._settings();
           safeCall(() => P.cur.set(value, s));
