@@ -22,12 +22,13 @@ import {
   computeAwards, medalMarkup, awardBadge, awardIcon, rankEmblem, rankTier, RANK_TIERS, inkBurst, InkWipe, createPreview,
   sweepEdge, sweepClip, splatClip, splatCover, skinSwatch, irisSwatch, outfitIcon,
 } from './menu-art.js';
+import { installOnlineScreens } from './menus-online.js';
 
-const SCREENS = ['loading', 'title', 'main', 'loadout', 'setup', 'locker', 'settings', 'howto', 'credits', 'pause', 'results'];
+const SCREENS = ['loading', 'title', 'main', 'loadout', 'setup', 'locker', 'settings', 'howto', 'credits', 'pause', 'results', 'online', 'lobby'];
 // Transitions that get the full-screen ink wipe (the rest use staggered pop-ins).
 const WIPES = new Set(['loading>title', 'title>main', 'results>main', 'pause>main', 'results>null', 'pause>title']);
 // Pushes/pops between these get the light ink swipe (decorative — the swap itself is immediate).
-const LIGHT = new Set(['main', 'loadout', 'setup', 'locker', 'settings', 'howto', 'credits', 'pause']);
+const LIGHT = new Set(['main', 'loadout', 'setup', 'locker', 'settings', 'howto', 'credits', 'pause', 'online', 'lobby']);
 // Stage art rendered from the real game by tools/stage-shots.mjs: <id>-<day|dusk>[-sm].webp (resolved against this
 // module so the UI lab in tools/ finds them too). Missing art falls back to the layout thumbnail.
 const STAGE_DIR = new URL('../../assets/stages/', import.meta.url).href;
@@ -66,6 +67,7 @@ const LOCKER_TABS = [
 ];
 const MENU_DESC = {
   play: 'Pick a stage, day or dusk, and jump into a 4 v 4 Turf War',
+  online: 'Host a room or join friends with a code — up to 4 v 4, bots fill the gaps',
   loadout: 'Choose your weapon: stats, sub and special for every kind',
   locker: 'Choose your squidkid — tentacles, headgear, eyes, skin and outfit',
   settings: 'Controls, video, audio and gameplay options',
@@ -408,7 +410,7 @@ export class Menus {
     if (this._stack.length > 1) {
       this._sfx('ui_back');
       this.show(this._stack[this._stack.length - 2], { pop: true, back: true });
-    } else if (['loadout', 'setup', 'locker', 'settings', 'howto', 'credits'].includes(this.current)) {
+    } else if (['loadout', 'setup', 'locker', 'settings', 'howto', 'credits', 'online'].includes(this.current)) {
       this._sfx('ui_back'); // opened directly by the engine: fall back to the main menu
       this.show('main', { back: true });
     }
@@ -739,13 +741,14 @@ export class Menus {
     const sub = this._sub();
     const items = [
       { id: 'play', label: 'PLAY', sub: 'Turf War · 4 v 4', icon: GLYPHS.play, cls: 'iw-btn--menu iw-btn--xl iw-btn--primary', accept: () => this._go('setup'), sound: 'ui_confirm' },
+      ...(this.api.online ? [{ id: 'online', label: 'PLAY ONLINE', icon: GLYPHS.users, cls: 'iw-btn--menu', accept: () => this._go('online'), sound: 'ui_confirm' }] : []),
       { id: 'loadout', label: 'LOADOUT', icon: weaponIcon(W.kind || lo.weapon), cls: 'iw-btn--menu', accept: () => this._go('loadout') },
       { id: 'locker', label: 'LOCKER', icon: GLYPHS.hanger, cls: 'iw-btn--menu', accept: () => this._go('locker') },
       { id: 'settings', label: 'SETTINGS', icon: GLYPHS.gear, cls: 'iw-btn--menu', accept: () => this._go('settings') },
       { id: 'howto', label: 'HOW TO PLAY', icon: GLYPHS.question, cls: 'iw-btn--menu', accept: () => this._go('howto') },
       { id: 'credits', label: 'CREDITS', icon: GLYPHS.star, cls: 'iw-btn--menu', accept: () => this._go('credits') },
     ];
-    const tilts = [-2.2, 1.4, -1.1, 1.6, -1.3, 1.1];
+    const tilts = [-2.2, 1.4, -1.1, 1.6, -1.3, 1.1, -1.5];
     const btns = items.map((it, i) => { const b = this._btn({ ...it, tilt: tilts[i % tilts.length] }); b.classList.add('iw-in', 'iw-in--left'); return b; });
     const descText = h('span', { class: 'iw-main__desctext' });
     const desc = h('div', { class: 'iw-main__desc iw-in iw-in--left' }, h('i', { class: 'iw-main__descdot' }), descText);
@@ -777,7 +780,7 @@ export class Menus {
       h('div', { class: 'iw-kitcard__chips' },
         h('span', { class: 'iw-chip' }, h('i', { html: SUB_ICONS.bomb }), sub.name),
         h('span', { class: 'iw-chip' }, h('i', { html: specialIcon(sp.id) }), sp.name)));
-    const el = h('div', { class: 'iw-screen iw-main' },
+    const el = h('div', { class: 'iw-screen iw-main' + (items.length > 6 ? ' iw-main--7' : '') },
       h('div', { class: 'iw-scrim-left' }),
       h('div', { class: 'iw-main__logo iw-in iw-in--down', html: logoMarkup(GAME_TITLE, GAME_SUBTITLE, 'sm') }),
       h('nav', { class: 'iw-main__menu' }, btns),
@@ -2026,12 +2029,17 @@ export class Menus {
   }
 
   _scr_pause() {
+    const ov = G.match && G.match.online && this.api.online ? this.api.online.view() : null;
+    const quitTitle = !ov ? 'QUIT MATCH?' : ov.isHost ? 'END MATCH?' : 'LEAVE MATCH?';
+    const quitText = !ov ? 'You will leave this Turf War and head back to the lobby. Your turf will not count.'
+      : ov.isHost ? 'The match ends for everyone and the whole room goes back to the lobby.'
+        : 'You leave the room; a bot takes over your squidkid for the rest of the match.';
     const items = [
       { id: 'resume', label: 'RESUME', icon: GLYPHS.play, cls: 'iw-btn--menu iw-btn--primary', accept: () => this._resume(), sound: null },
       { id: 'settings', label: 'SETTINGS', icon: GLYPHS.gear, cls: 'iw-btn--menu', accept: () => this._go('settings') },
       { id: 'howto', label: 'HOW TO PLAY', icon: GLYPHS.question, cls: 'iw-btn--menu', accept: () => this._go('howto') },
-      { id: 'quit', label: 'QUIT MATCH', icon: GLYPHS.close, cls: 'iw-btn--menu iw-btn--danger', accept: () => this._openModal({
-        title: 'QUIT MATCH?', text: 'You will leave this Turf War and head back to the lobby. Your turf will not count.', danger: true,
+      { id: 'quit', label: !ov ? 'QUIT MATCH' : ov.isHost ? 'END MATCH' : 'LEAVE MATCH', icon: GLYPHS.close, cls: 'iw-btn--menu iw-btn--danger', accept: () => this._openModal({
+        title: quitTitle, text: quitText, danger: true,
         buttons: [
           { label: 'KEEP PLAYING', accept: () => this._closeModal(), sound: null },
           { label: 'QUIT', cls: 'iw-btn--danger', sound: 'ui_confirm', accept: () => {
@@ -2120,7 +2128,8 @@ export class Menus {
     const el = h('div', { class: 'iw-screen iw-pause' },
       h('div', { class: 'iw-pause__dim' }),
       h('div', { class: 'iw-pause__col' },
-        h('div', { class: 'iw-pause__title iw-in iw-in--down' }, h('span', { class: 'iw-pause__blob', html: splatSVG({ seed: 3, cls: 'iw-fa', r: 60, arms: 8, drops: 4 }) }), h('span', { class: 'iw-display' }, 'PAUSED')),
+        h('div', { class: 'iw-pause__title iw-in iw-in--down' }, h('span', { class: 'iw-pause__blob', html: splatSVG({ seed: 3, cls: 'iw-fa', r: 60, arms: 8, drops: 4 }) }), h('span', { class: 'iw-display' }, ov ? 'MENU' : 'PAUSED')),
+        ov ? h('div', { class: 'iw-pause__live iw-in iw-in--down' }, 'ONLINE — THE MATCH KEEPS GOING') : null,
         h('nav', { class: 'iw-pause__menu' }, btns)),
       matchPanel,
       this._prompts([['Enter', 'A', 'Select'], ['Esc', 'Start', 'Resume']]));
@@ -2233,10 +2242,10 @@ export class Menus {
       h('div', { class: 'iw-xp__mid' }, h('div', { class: 'iw-xp__row' }, h('span', null, gainEl, lvUp), nextEl), bar,
         bdEls.length ? h('div', { class: 'iw-xp__bd' }, bdEls.map((b) => b.el)) : null));
 
-    const rematch = this._btn({ id: 'rematch', label: 'REMATCH', icon: GLYPHS.reset, cls: 'iw-btn--wide iw-btn--primary iw-in iw-in--pop', sound: 'ui_confirm', accept: () => {
+    const rematch = this._btn({ id: 'rematch', label: d.online ? 'BACK TO LOBBY' : 'REMATCH', icon: d.online ? GLYPHS.users : GLYPHS.reset, cls: 'iw-btn--wide iw-btn--primary iw-in iw-in--pop', sound: 'ui_confirm', accept: () => {
       safeCall(() => this.api.rematch && this.api.rematch());
     } });
-    const home = this._btn({ id: 'home', label: 'MAIN MENU', icon: GLYPHS.back, cls: 'iw-btn--wide iw-in iw-in--pop', sound: 'ui_click', accept: () => {
+    const home = this._btn({ id: 'home', label: d.online ? 'LEAVE ROOM' : 'MAIN MENU', icon: GLYPHS.back, cls: 'iw-btn--wide iw-in iw-in--pop', sound: 'ui_click', accept: () => {
       safeCall(() => this.api.toMainMenu && this.api.toMainMenu());
       if (this.current === 'results') this.show('main', { wipe: true });
     } });
@@ -2424,3 +2433,5 @@ export class Menus {
     };
   }
 }
+
+installOnlineScreens(Menus);

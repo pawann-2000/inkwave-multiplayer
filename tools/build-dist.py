@@ -24,5 +24,7 @@ for f in seen:
 os.makedirs('dist/vendor/three/build', exist_ok=True)
 for f in ['three.module.js', 'three.core.js']: shutil.copy('vendor/three/build/' + f, 'dist/vendor/three/build/' + f)
 for d in ['src', 'styles', 'assets']: shutil.copytree(d, 'dist/' + d)
+# online play: P2P signaling (Trystero over Nostr) — loaded on demand when a player opens the online lobby
+for d in ['vendor/trystero', 'vendor/noble-secp256k1']: shutil.copytree(d, 'dist/' + d, ignore=shutil.ignore_patterns('*.map'))
 shutil.copy('index.html', 'dist/index.html')
 print('dist ready:', len(seen), 'addon files')

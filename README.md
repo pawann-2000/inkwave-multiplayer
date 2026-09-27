@@ -12,6 +12,7 @@
 <p align="center">
   <a href="https://inkwave-aah.pages.dev"><b>▶ Play now</b></a> ·
   <a href="#controls">Controls</a> ·
+  <a href="#online-play">Online play</a> ·
   <a href="#running-locally">Run locally</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="CONTRIBUTING.md">Contributing</a>
@@ -29,6 +30,7 @@
 ## Features
 
 - **Turf war, 4 v 4.** Three minutes, most ground painted wins. Play against bots on three difficulty levels.
+- **Online with friends.** Host a room, share a code or link, and play up to 4 v 4, peer-to-peer with no account and no game server. Bots fill the empty slots.
 - **Squid form.** Hold to dive into your ink: swim fast, refill your tank, climb inked walls, dolphin-jump water gaps.
 - **Seven weapons**, each with its own feel: Spritzer (shooter), Swell Roller, Glint Charger, Popper Blaster, Twinfin Dualies (dodge roll), Tidebucket Slosher and Gyre Splatling. Every kit comes with Splat Bombs and a special.
 - **Three stages, day or dusk.** Tidewater Plaza, Kelpline Terminal and Halyard Marina, a working marina with a car ferry moored across the middle where the water gaps are the whole point.
@@ -58,6 +60,21 @@
 
 Gamepads work on the hosted (https) version. On a plain `http://` LAN address browsers block the Gamepad API.
 
+## Online play
+
+**PLAY ONLINE → HOST A ROOM** gives you a room code and an invite link. Friends open the link, or choose
+**PLAY ONLINE → JOIN** and type the code. In the lobby everyone picks a team (up to 4 per side) and a weapon, and the
+host picks the stage and presses START. Empty slots can be filled with bots.
+
+Matches are peer-to-peer over WebRTC. Browsers find each other through public Nostr relays
+([Trystero](https://github.com/dmotz/trystero)), and all game data then flows directly between players. Everyone in a
+room can see the others' IP addresses, so share codes with people you trust. The authority model, wire protocol,
+configuration (TURN, pinned relays) and threat model are in [docs/NETWORK.md](docs/NETWORK.md).
+
+Online play needs a secure page: the hosted (https) version, or `http://localhost` on your own machine. Browsers
+withhold the WebCrypto API that WebRTC signaling uses on plain `http://` LAN addresses. To try it on one machine, open
+two tabs with `?net=local`: one hosts, the other joins with the code.
+
 ## Running locally
 
 There is no build step. Any static file server works; the included one also serves to your LAN and sends no-cache headers so module updates are never stale.
@@ -73,6 +90,8 @@ Useful URL parameters: `?map=halyard&time=dusk` picks a stage, `&autostart=180` 
 ```bash
 npm install      # once, for the headless tools
 npm run check    # syntax-check every module
+npm test         # online-play protocol tests (node)
+npm run mptest   # 3 headless tabs play an online match and must agree (needs Chrome; see docs/NETWORK.md)
 npm run smoke    # boot + 8 s of autopilot in headless Chrome, fails on console errors
 npm run build    # assemble dist/ (game + only the three.js addons it imports)
 ```

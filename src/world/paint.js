@@ -19,7 +19,9 @@
 // lands after that, and on walls the lower edge sags into drips that keep running for 1.5–3 s. Each splat also sends
 // a ripple across the ink surface (paint.ripple — also used by footsteps / dives / landings via fxHooks).
 //
-// API: splat(center, radius, team, { seed, stretch: Vector3, stretchAmt, kind, instant, cosmetic }) → m² claimed
+// API: splat(center, radius, team, { seed, stretch: Vector3, stretchAmt, kind, instant, cosmetic, remote, credit }) → m² claimed
+//      onSplat(center, radius, team, seed, kind, stretch|null, stretchAmt, credit) — optional hook, called for every
+//        gameplay splat (not cosmetic, not `remote`) that touched a face: online play broadcasts them (netmatch.js)
 //      speck(center, radius, team, seed)  — cosmetic micro-splat (landing droplets), GPU only
 //      ripple(pos, amp, wavelength, speed, life) · setView(camPos) · flush(dt) · sample/sampleWorld/coverage/regionStats
 // kind: 'shot' 'line' 'blast' 'bomb' 'trail' 'drop' 'roll' 'speck' (inferred from radius/stretch when omitted;
@@ -226,6 +228,7 @@ export class PaintSystem {
     this.clock = 0;
     this.frame = 0;
     this.viewPos = null;       // camera position (setView) — ripples far from it are skipped / evicted first
+    this.onSplat = null;       // online: gameplay-splat hook (see the API notes above)
     // ripple table read by the level shader (inkShading.js): xyz + birth (paint clock) · amp, wavelength, speed, life
     this.rip = new Float32Array(RIP_N * 4);
     this.ripP = new Float32Array(RIP_N * 4);
@@ -459,6 +462,8 @@ export class PaintSystem {
         // drips does not turn the ink into rain)
         this.ripple(center, 0.0038 + 0.0036 * Math.min(radius, 3), 0.1 + 0.05 * Math.min(radius, 3), 0.85 + 0.35 * Math.min(radius, 3), 0.55 + 0.2 * Math.min(radius, 3));
       }
+      // online: every other peer re-applies this exact splat (`remote`), so all turf grids agree
+      if (this.onSplat && !cosmetic && !opts.remote) this.onSplat(center, radius, team, seed, kind, st || null, st ? (opts.stretchAmt ?? 1) : 0, opts.credit || null);
     }
     return claimed;
   }

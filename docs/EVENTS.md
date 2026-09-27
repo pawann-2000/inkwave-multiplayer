@@ -49,3 +49,13 @@ screen-FX modules should subscribe to these instead of editing gameplay code.
 - Extra SFX names available to everyone via `G.audio.play(name, { pos, volume, pitch })`: `step_dry`, `step_ink`,
   `step_enemy`, `ink_drip`, `gull`, `harbor_ambience` (loop) — plus the full list in docs/CONTRACTS.md §2.
 - Need a new sound? Add a def in src/audio/audio.js and list it in SFX_GROUPS.
+
+## Online play (src/net/netmatch.js)
+| event | payload | where |
+|---|---|---|
+| `net:takeover` | `{ actor }` — a player left mid-match; the host's bots play their squidkid from now on | netmatch.js |
+| `net:replaced` | `{}` — *our* squidkid was handed to a bot (this browser took too long to load the stage) | netmatch.js |
+
+Online, the events above are also emitted for remote squidkids (their owner's shots, splats, respawns, specials and
+super jumps are replayed on every screen), so FX / HUD / audio subscribers keep working unchanged. Check
+`actor.owned` when something must happen only on the browser that simulates that squidkid.

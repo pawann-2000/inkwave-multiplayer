@@ -23,8 +23,15 @@ import { CameraRig } from './game/cameraRig.js';
 import { Match } from './game/match.js';
 import { Minimap } from './game/minimap.js';
 import { Showcase } from './game/showcase.js';
+import { Session } from './net/session.js';
+import { NetMatch } from './net/netmatch.js';
 
 const params = new URLSearchParams(location.search);
+// online dev/test: ?net=local runs rooms over BroadcastChannel between tabs of this browser (no network), and
+// &lag=ms&jitter=ms simulates a slow link there
+const NET_OPTS = params.get('net') === 'local'
+  ? { local: true, lag: Math.min(1000, +params.get('lag') || 0), jitter: Math.min(1000, +params.get('jitter') || 0) }
+  : {};
 const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
 
 // ------------------------------------------------------------------------------------------ persistence
@@ -53,6 +60,29 @@ class Game {
     const app = document.getElementById('app');
     this.uiRoot = document.getElementById('ui-root');
     this.fadeEl = document.getElementById('fade');
+
+    // online rooms (peer-to-peer; nothing connects until the player hosts or joins)
+    this.session = new Session({
+      profile: () => ({ name: this.profile.name, style: this.profile.style || {}, weapon: this.profile.weapon || 'shooter' }),
+      defaults: () => {
+        const s = this.settings, mapId = MAPS.some((m) => m.id === s.lastStage) ? s.lastStage : MAPS[0].id;
+        const t = s.stageTimes && s.stageTimes[mapId];
+        return { mapId, time: t === 'dusk' || t === 'day' ? t : (s.timeOfDay === 'dusk' ? 'dusk' : 'day'), duration: s.matchLength, difficulty: s.difficulty, bots: true };
+      },
+      onStart: (cfg) => {
+        this.startOnlineMatch(cfg).catch((e) => {
+          console.error('[inkwave] online start', e);
+          if (this.session.isHost) this.session.endMatch('host');
+          this._leaveMatchTo(this.session.status === 'lobby' ? 'lobby' : 'online');
+        });
+      },
+      onEnd: (reason) => this._onlineEnded(reason),
+      onGame: (p, origin) => this.netMatch?.receive(p, origin),
+      onControl: (c) => this.netMatch?.control(c),
+      onPeerLeft: (id) => this._onlinePeerLeft(id),
+      onAllLoaded: (mid, missing) => this._onlineAllLoaded(mid, missing),
+    });
+    this.netMatch = null;
 
     // UI first so the loading screen shows immediately
     const [menusMod, hudMod] = await Promise.all([loadModule('./ui/menus.js'), loadModule('./ui/hud.js')]);
@@ -121,7 +151,9 @@ class Game {
     G.fx.onDropletLand = (point, normal, color, size) => {
       const team = this._teamOfColor(color);
       if (team < 0) return;
-      G.paint.splat(this._tmpV.copy(point).addScaledVector(normal, 0.05), clamp(size * 2.4, 0.12, 0.45), team, { seed: Math.random() });
+      // online, flying droplets land differently on every screen: they stay decoration there (no turf claim), so
+      // every browser's turf grid keeps agreeing
+      G.paint.splat(this._tmpV.copy(point).addScaledVector(normal, 0.05), clamp(size * 2.4, 0.12, 0.45), team, G.net ? { seed: Math.random(), kind: 'drop', cosmetic: true } : { seed: Math.random() });
     };
     this._tmpV = new THREE.Vector3(); this._tmpC = new THREE.Color();
     this.rig = new CameraRig(camera);
@@ -148,10 +180,13 @@ class Game {
     this.timer = new THREE.Timer(); this.timer.connect?.(document);
     this.fpsAcc = 0; this.fpsN = 0; this.fps = 60;
     G.mode = 'menu';
-    this.menus?.show(params.has('skipTitle') ? 'main' : 'title');
+    this.menus?.show(params.has('skipTitle') || params.has('join') ? 'main' : 'title');
     this._applyAudioVolumes();
     requestAnimationFrame(() => this._loop());
+    this._initBackgroundTick();
     if (params.has('autostart')) this.api.startMatch({ mapId: map.id, difficulty: this.settings.difficulty, duration: +params.get('autostart') || this.settings.matchLength });
+    // invite link: ?join=ABCDE-12345 opens the online screen and joins the room
+    else if (params.has('join')) { this.menus?.show('online', { push: true, join: params.get('join') }); }
     this.bootMs = Math.round(performance.now() - t0);
     window.__inkwave = this; // debug/audit hook
     window.__G = G;
@@ -297,20 +332,34 @@ class Game {
         const p = self.profile;
         return { ...p, played: p.matches, xpToNext: PROGRESSION.xpForLevel(p.level) };
       },
-      setProfileName: (n) => { self.profile.name = String(n || 'Player').slice(0, 16); saveJSON('inkwave.profile', self.profile); },
+      setProfileName: (n) => { self.profile.name = String(n || 'Player').slice(0, 16); saveJSON('inkwave.profile', self.profile); self.session.updateProfile(); },
       // locker look ({ hair, skin, outfit, eyes, hat, brows, … } — indices into character-style.js tables)
-      setProfileStyle: (st) => { self.profile.style = { ...(st || {}) }; saveJSON('inkwave.profile', self.profile); },
+      setProfileStyle: (st) => { self.profile.style = { ...(st || {}) }; saveJSON('inkwave.profile', self.profile); self.session.updateProfile(); },
       getLoadout: () => ({ weapon: self.profile.weapon || 'shooter' }),
       setLoadout: ({ weapon }) => {
         if (!WEAPONS[weapon]) return;
         self.profile.weapon = weapon; saveJSON('inkwave.profile', self.profile);
+        self.session.updateProfile();
         if (self.menus?.current === 'loadout') self.showcase.showLoadout(weapon, G.teamColors[0], self.profile.style);
       },
       startMatch: (o) => self.startMatch(o),
       resumeMatch: () => self.resume(),
       quitMatch: () => self.quitToMenu(),
-      rematch: () => self.startMatch(self.lastMatchOpts || {}),
-      toMainMenu: () => self.quitToMenu(),
+      // online: the results screen's buttons read "back to lobby" / "leave room"
+      rematch: () => (self.match?.online ? self._backToLobby() : self.startMatch(self.lastMatchOpts || {})),
+      toMainMenu: () => { if (self.session.status !== 'idle') self.session.leave(); return self.quitToMenu(); },
+      // online rooms (the lobby screens in menus-online.js)
+      online: {
+        view: () => self.session.view(),
+        subscribe: (fn) => self.session.subscribe(fn),
+        host: () => self.session.host(NET_OPTS),
+        join: (code) => self.session.join(code, NET_OPTS),
+        leave: () => self.session.leave(),
+        start: () => self.session.start(),
+        setTeam: (t) => self.session.setTeam(t),
+        setSettings: (p) => self.session.setSettings(p),
+        kick: (id) => self.session.kick(id),
+      },
       onScreenChange: (s) => self._onScreen(s),
       playSound: (n) => { G.audio?.init?.(); G.audio?.play(n); },
     });
@@ -406,6 +455,7 @@ class Game {
       if (!this.match || this.match.attract) return;
       const local = this.match.local;
       if (attacker?.isLocal) {
+        if (!victim.owned) this.hud?.hitMarker('kill');   // online: the victim's browser confirmed our splat
         G.audio?.play('splat_enemy', { volume: 0.9 });
         this.hud?.feed({ text: `You splatted ${victim.name}!`, color: G.teamHex[local.team], kind: 'kill' });
       } else if (victim.isLocal) {
@@ -447,8 +497,21 @@ class Game {
     });
     on('match:oneminute', () => { this.hud?.banner('one_minute'); G.audio?.play('one_minute'); this._playMusic('battle_final'); });
     on('match:count', ({ n }) => { this.hud?.countdown(n); G.audio?.play('final_count'); });
+    // online: our squidkid was handed to a bot (we took too long to load the stage): out to the lobby
+    on('net:replaced', () => {
+      if (!this.match?.online) return;
+      this.session.notice = 'You took too long to load, so a bot took your place. You\u2019ll join the next match.';
+      this._leaveMatchTo(this.session.status === 'lobby' ? 'lobby' : 'online');
+    });
+    // online: a leaver's squidkid keeps playing as a bot (the host simulates it from here on)
+    on('net:takeover', ({ actor }) => {
+      if (!this.match || !actor) return;
+      const mine = actor.team === this.match.local?.team;
+      this.hud?.feed({ text: `${actor.name} left — a bot takes over`, color: G.teamHex[actor.team], kind: mine ? 'death' : 'info' });
+    });
     on('match:state', ({ state, match }) => {
       if (match.attract || match !== this.match) return;
+      if (state === 'intro' && match.online) this._onlineReveal();
       if (state === 'intro') this._intro();
       if (state === 'playing') {
         this.hud?.banner('go'); G.audio?.play('go_horn');
@@ -465,6 +528,7 @@ class Game {
 
   // ---------------------------------------------------------------------------------------- attract mode
   _startAttract() {
+    this._endOnline();
     if (this.match) this.match.dispose();
     G.projectiles.clear(); G.fx.clear?.(); G.paint.clear();
     const m = (this.match = G.match = new Match({ attract: true, duration: 99999, difficulty: 'normal', CharacterClass: this.CharacterClass, rig: this.rig, input: this.input }));
@@ -509,7 +573,29 @@ class Game {
     this.props?.setNight?.(k); this.decor?.setNight?.(k);
   }
 
+  // Stage, time of day and a clean slate for a new match (offline and online starts).
+  async _prepareStage(mapId, time) {
+    G.music?.stop?.(0.3); this._musicTrack = null;
+    this.showcase.hide();
+    this._endOnline();
+    if (this.match) this.match.dispose();
+    G.projectiles.clear(); G.fx.clear?.(); G.paint.clear();
+    const map = MAPS.find((m) => m.id === mapId) || MAPS[0];
+    if ((map.layout || map.id) !== this.layoutId) await this._buildWorld(map);
+    const theme = mapTheme(map, time);
+    this.time = time === 'dusk' ? 'dusk' : 'day';
+    if (theme !== this.theme) {
+      this.theme = theme;
+      G.env.setTheme?.(theme);
+      if (G.env.envMap) G.scene.environment = G.env.envMap;
+      G.fx.setLighting?.(G.env.getSkyColors?.());
+    }
+    this._applyNight();   // after any stage rebuild too (new prop kit / decor)
+    this.mapDef = map;
+  }
+
   async startMatch(o = {}) {
+    if (this.session.status !== 'idle') this.session.leave();   // an offline match never runs inside a room
     const opts = {
       mapId: o.mapId === 'sunset' ? 'tidewater' : (o.mapId || this.mapDef.id),
       time: o.mapId === 'sunset' ? 'dusk' : (o.time || this.time || 'day'),
@@ -521,22 +607,7 @@ class Game {
     this.input.requestLock();
     this.menus?.show(null);
     await this._fade(1, 350);
-    G.music?.stop?.(0.3); this._musicTrack = null;
-    this.showcase.hide();
-    if (this.match) this.match.dispose();
-    G.projectiles.clear(); G.fx.clear?.(); G.paint.clear();
-    const map = MAPS.find((m) => m.id === opts.mapId) || MAPS[0];
-    if ((map.layout || map.id) !== this.layoutId) await this._buildWorld(map);
-    const theme = mapTheme(map, opts.time);
-    this.time = opts.time === 'dusk' ? 'dusk' : 'day';
-    if (theme !== this.theme) {
-      this.theme = theme;
-      G.env.setTheme?.(theme);
-      if (G.env.envMap) G.scene.environment = G.env.envMap;
-      G.fx.setLighting?.(G.env.getSkyColors?.());
-    }
-    this._applyNight();   // after any stage rebuild too (new prop kit / decor)
-    this.mapDef = map;
+    await this._prepareStage(opts.mapId, opts.time);
     this._setPalette(this._pickPalette());
     const m = (this.match = G.match = new Match({
       attract: false, duration: opts.duration, difficulty: opts.difficulty, weapon: this.profile.weapon || 'shooter',
@@ -552,15 +623,113 @@ class Game {
     this._fade(0, 500);
   }
 
+  // ---------------------------------------------------------------------------------------- online match flow
+  // The host started a match (session 'start', or our own START on the host). Build the stage behind the loading
+  // screen, then sit in 'wait' until the host has heard from every browser and starts the intro for everyone.
+  async startOnlineMatch(cfg) {
+    const mid = cfg.mid;
+    const stale = () => this.session.mid !== mid || this.session.phase !== 'match';
+    this._onlineLoading = true; this._pendingEnd = null;
+    try {
+      G.audio?.init?.();
+      this.input.exitLock();
+      this.menus?.show(null);
+      await this._fade(1, 300);
+      this.menus?.show('loading');
+      this.menus?.setLoading(0.3, 'Joining the turf war…');
+      this._fade(0, 200);
+      // (a macrotask, not a frame: a hidden tab gets no animation frames but must still load — see _bgFrame)
+      await new Promise((r) => setTimeout(r, 30));
+      if (stale()) return;
+      await this._prepareStage(cfg.mapId, cfg.time);
+      if (stale()) return;
+      // same palette as the room (colours are per screen: the colour-blind setting still wins locally)
+      this._setPalette(this.settings.colorblind ? COLORBLIND_PALETTE : (TEAM_PALETTES[cfg.palette] || this._pickPalette()));
+      const m = (this.match = G.match = new Match({
+        attract: false, duration: cfg.duration, difficulty: cfg.difficulty, weapon: this.profile.weapon || 'shooter',
+        playerName: this.profile.name || 'Player', CharacterClass: this.CharacterClass, rig: this.rig, input: this.input,
+        autopilot: params.has('autopilot'), style: this.profile.style || null,
+        online: { roster: cfg.roster, isHost: cfg.isHost, selfId: cfg.selfId },
+      }));
+      m.setup();
+      this.netMatch = new NetMatch(this.session, m, cfg);
+      this._bgSync?.();   // (already hidden? keep ticking)
+      this.lastMatchOpts = { mapId: cfg.mapId, time: cfg.time, difficulty: cfg.difficulty, duration: cfg.duration };
+      this.minimap.setViewerTeam(m.local ? m.local.team : 0);
+      G.mode = 'match';
+      this.hud?.setVisible(false);
+      this.hudPrompt = null; this._hintT = 0; this._hints = {};
+      m.start();   // 'wait'
+      this.rig.overview();
+      this.menus?.setLoading(0.92, 'Waiting for squidkids…');
+      this.session.markLoaded();
+    } finally {
+      this._onlineLoading = false;
+    }
+    const pendingEnd = this._pendingEnd;
+    this._pendingEnd = null;
+    // the room moved on while the stage loaded (match ended, host gone): back to the lobby / online screen
+    if (stale() || !this.netMatch || this.netMatch.mid !== mid) return this._leaveMatchTo(this.session.status === 'lobby' ? 'lobby' : 'online');
+    if (pendingEnd) { this._onlineEnded(pendingEnd); return; }
+    if (this._pendingGo && this._pendingGo.mid === mid) { const g = this._pendingGo; this._pendingGo = null; this._onlineAllLoaded(g.mid, g.missing); }
+  }
+
+  // host: every browser has the stage (or timed out → its squidkid goes to a bot) — start the intro for the room
+  _onlineAllLoaded(mid, missing) {
+    const nm = this.netMatch, m = this.match;
+    if (!nm || nm.mid !== mid || !m) { this._pendingGo = { mid, missing }; return; }
+    if (m.state !== 'wait') return;
+    for (const id of missing) nm.takeOver(id);
+    m.setState('intro');
+  }
+
+  // host: a member left mid-match — the bots take their squidkid over
+  _onlinePeerLeft(id) { this.netMatch?.takeOver(id); }
+
+  // the intro is starting on every screen: drop the loading screen
+  _onlineReveal() {
+    this.menus?.show(null);
+    // the match started from a network message, not a click: the next click on the game takes the mouse
+    this._relock = true;
+    this.input.requestLock();
+  }
+
+  // The match ended under us (session.onEnd): the host quit the match, the host / room is gone, or we failed.
+  _onlineEnded(reason) {
+    if (this._onlineLoading) { this._pendingEnd = reason; return; }
+    const m = this.match;
+    if (!m || !m.online) return;   // not in a match: the lobby / online screens follow the session themselves
+    const roomAlive = this.session.status === 'lobby';
+    // results on screen and the room still there: everyone heads back to the lobby at their own pace
+    if (roomAlive && (m.state === 'judge' || m.state === 'results')) return;
+    if (roomAlive) this.session.notice = reason === 'host' ? 'The host ended the match.' : null;
+    this._leaveMatchTo(roomAlive ? 'lobby' : 'online');
+  }
+
+  // results → lobby (host: this also ends the match for anyone still on their results screen)
+  _backToLobby() {
+    if (this.session.isHost && this.session.phase === 'match') this.session.endMatch('ended');
+    return this._leaveMatchTo(this.session.status === 'lobby' ? 'lobby' : 'online');
+  }
+
+  _endOnline() {
+    if (this.netMatch) { this.netMatch.dispose(); this.netMatch = null; }
+    this._pendingGo = null;
+    this._bgSync?.();
+  }
+
   _intro() {
-    const L = G.level, pad = L.spawnPads[0];
+    const L = G.level;
     const local = this.match.local;
-    // sweep from high over the enemy base down behind the player (a stage can open on its own hero shot instead)
+    // sweep from high over the enemy base down behind the player (a stage can open on its own hero shot instead).
+    // Written for team 0; the other base is the 180° rotation of the stage, so team 1 gets the same shot mirrored.
+    const T = local ? local.team : 0, pad = L.spawnPads[0];
     const I = L.layout?.intro;
     const from = I ? new THREE.Vector3(...I.from) : new THREE.Vector3(18, 26, 30), to = new THREE.Vector3(pad.x, pad.y + 2.6, pad.z - (I?.toBack ?? 5.2));
     const lookFrom = I ? new THREE.Vector3(...I.lookFrom) : new THREE.Vector3(0, 0, 10), lookTo = new THREE.Vector3(pad.x, pad.y + 1.6, pad.z + 6);
+    if (T === 1) for (const v of [from, to, lookFrom, lookTo]) { v.x = -v.x; v.z = -v.z; }
     this.rig.cinematic(from, to, lookFrom, lookTo, 3.6, () => {});
-    this.rig.yaw = 0; this.rig.pitch = -0.12;
+    this.rig.yaw = T === 1 ? Math.PI : 0; this.rig.pitch = -0.12;
     G.audio?.play('ready');
     setTimeout(() => { if (this.match?.state === 'intro') this.hud?.banner('ready'); }, 1700);
     setTimeout(() => { if (this.match?.state === 'intro') this.hud?.setVisible(true); }, 3000);
@@ -571,6 +740,8 @@ class Game {
     if (!this.match || this.match.attract || this.match.paused) return;
     // only a live round (or its intro) can pause — never on top of time's up / judge / results
     if (this.match.state !== 'playing' && this.match.state !== 'intro') return;
+    // online the room plays on: the menu opens over the live match (your squidkid stands still meanwhile)
+    if (this.match.online) { this.input.exitLock(); this.menus?.show('pause'); return; }
     this.match.paused = true;
     this.input.exitLock();
     this.menus?.show('pause');
@@ -583,17 +754,26 @@ class Game {
     this.input.requestLock();
     G.audio?.duck?.(1, 0.01);
   }
-  async quitToMenu() {
+  quitToMenu() {
+    if (this.match?.online) {
+      // host: the match ends for the whole room (everyone back to the lobby) · member: leave the room
+      if (this.session.isHost && this.session.status === 'lobby') { this.session.endMatch('host'); return this._leaveMatchTo('lobby'); }
+      this.session.leave();
+    }
+    return this._leaveMatchTo('main');
+  }
+  async _leaveMatchTo(screen) {
     this.input.exitLock();
     this.menus?.show(null);
     await this._fade(1, 350);
+    this._endOnline();
     this.hud?.setVisible(false);
     this.hud?.hideSplatted?.();
     this.showcase.hide();
     G.mode = 'menu';
     this._setPalette(this._pickPalette());
     this._startAttract();
-    this.menus?.show('main');
+    this.menus?.show(screen);
     this._playMusic('menu');
     G.audio?.duck?.(1, 0.01);
     this._fade(0, 500);
@@ -604,30 +784,36 @@ class Game {
     this.hud?.hideSplatted?.();
     this.rig.overview();
     this.hud?.setVisible(true);
-    const cov = m.result.coverage;
-    const judgeP = this.hud?.judge({ colors: [G.teamHex[0], G.teamHex[1]], percents: [cov[0] * 100, cov[1] * 100], names: this.palette.names || TEAM_NAMES });
+    // everything below is from the local player's side: your team first (online you may be team 1)
+    const local = m.local, T = local ? local.team : 0, E = 1 - T;
+    const cov = m.result.coverage, names = this.palette.names || TEAM_NAMES;
+    // the table is frozen as judging starts (online: the same instant the host sends its numbers), so a storm cloud
+    // still raining during the reveal can't make one screen's table differ from another's
+    const final = new Map(m.actors.map((a) => [a, { turf: Math.round(a.stats.turf), splats: a.stats.splats, deaths: a.stats.deaths }]));
+    const judgeP = this.hud?.judge({ colors: [G.teamHex[T], G.teamHex[E]], percents: [cov[T] * 100, cov[E] * 100], names: [names[T], names[E]] });
     await (judgeP || new Promise((r) => setTimeout(r, 4000)));
-    const won = m.result.winner === 0;
+    if (m !== this.match) return;   // (online: we left while the judge animation ran)
+    const won = m.result.winner === T;
     m.setState('results');
     this.hud?.setVisible(false);
     // profile / XP
-    const local = m.local;
     const p = this.profile;
-    const turf = Math.round(local.stats.turf);
-    const gained = Math.round((won ? PROGRESSION.xpWin : PROGRESSION.xpLose) + turf * PROGRESSION.xpPerTurfPoint + local.stats.splats * PROGRESSION.xpPerSplat);
+    const mine = final.get(local), turf = mine.turf;
+    const gained = Math.round((won ? PROGRESSION.xpWin : PROGRESSION.xpLose) + turf * PROGRESSION.xpPerTurfPoint + mine.splats * PROGRESSION.xpPerSplat);
     const before = { level: p.level, xp: p.xp, toNext: PROGRESSION.xpForLevel(p.level) };
     p.xp += gained; p.matches++; if (won) p.wins++; p.totalTurf += turf;
     while (p.xp >= PROGRESSION.xpForLevel(p.level)) { p.xp -= PROGRESSION.xpForLevel(p.level); p.level++; }
     saveJSON('inkwave.profile', p);
     const data = {
-      win: won, percents: [cov[0] * 100, cov[1] * 100], colors: [G.teamHex[0], G.teamHex[1]], teamNames: this.palette.names || TEAM_NAMES,
-      players: m.actors.map((a) => ({ name: a.name, team: a.team, weapon: a.weaponId, turf: Math.round(a.stats.turf), splats: a.stats.splats, deaths: a.stats.deaths, isSelf: a.isLocal })),
+      win: won, percents: [cov[T] * 100, cov[E] * 100], colors: [G.teamHex[T], G.teamHex[E]], teamNames: [names[T], names[E]],
+      players: m.actors.map((a) => ({ name: a.name, team: a.team === T ? 0 : 1, weapon: a.weaponId, ...final.get(a), isSelf: a.isLocal })),
       xp: { gained, levelBefore: before.level, levelAfter: p.level, xpBefore: before.xp, xpAfter: p.xp, xpToNextBefore: before.toNext, xpToNextAfter: PROGRESSION.xpForLevel(p.level) },
       mapName: this.mapDef.name,
+      online: !!m.online,
     };
     // your team on the podium
-    const team = m.actors.filter((a) => a.team === 0);
-    this.showcase.showResults(0, won, G.teamColors[0], team.map((a) => ({ weapon: a.weaponId, style: a.character.style || { hair: a.slot % 4, skin: (a.slot * 3) % 4 }, name: a.name })));
+    const team = m.actors.filter((a) => a.team === T);
+    this.showcase.showResults(T, won, G.teamColors[T], team.map((a) => ({ weapon: a.weaponId, style: a.character.style || { hair: a.slot % 4, skin: (a.slot * 3) % 4 }, name: a.name })));
     this.menus?.showResults(data);
     this.menus?.show('results');
     G.audio?.play(won ? 'victory_fanfare' : 'defeat_jingle');
@@ -649,12 +835,49 @@ class Game {
   _loop() {
     requestAnimationFrame(() => this._loop());
     this.timer.update(); let dt = this.timer.getDelta();
-    if (this.frozen) return;
+    if (this.frozen || this._bgActive) return;   // (hidden tab online: the background tick drives the frames)
     this.fpsAcc += dt; this.fpsN++;
     if (this.fpsAcc > 0.5) { this.fps = Math.round(this.fpsN / this.fpsAcc); this.fpsAcc = 0; this.fpsN = 0; }
     this._dynRes(dt);
     dt = Math.min(dt, 1 / 24);
     this._frame(dt);
+  }
+
+  // Online, a hidden tab must keep simulating its squidkid(s) and talking to the room: requestAnimationFrame stops in
+  // background tabs (a sleeping host would freeze the match for everyone) and page timers are throttled to ~1 Hz. A
+  // tiny worker's timer is not, so while hidden its ticks drive sim-only frames (no rendering) until the tab is back.
+  _initBackgroundTick() {
+    this._bgActive = false;
+    this._bgSync = () => {
+      const want = document.hidden && !!this.netMatch;
+      if (want === this._bgActive) return;
+      if (want) {
+        if (!this._bgWorker) {
+          try {
+            this._bgUrl = URL.createObjectURL(new Blob(['setInterval(() => postMessage(0), 33);'], { type: 'text/javascript' }));
+            this._bgWorker = new Worker(this._bgUrl);
+            this._bgWorker.onmessage = () => this._bgFrame();
+          } catch (e) { console.warn('[inkwave] background tick unavailable', e); return; }
+        }
+        this._bgActive = true;
+        this._bgLast = performance.now();
+      } else {
+        this._bgActive = false;
+        this._bgWorker?.terminate(); this._bgWorker = null;
+        if (this._bgUrl) { URL.revokeObjectURL(this._bgUrl); this._bgUrl = null; }
+        this.timer?.update();   // the next visible frame measures from now, not from when the tab was hidden
+      }
+    };
+    document.addEventListener('visibilitychange', this._bgSync);
+  }
+  _bgFrame() {
+    if (!this._bgActive) return;
+    if (!this.netMatch || !document.hidden) { this._bgSync(); return; }
+    const now = performance.now(), dt = Math.min(1 / 24, Math.max(0, (now - this._bgLast) / 1000));
+    this._bgLast = now;
+    if (dt <= 0) return;
+    this._skipRender = true;
+    try { this._frame(dt); } finally { this._skipRender = false; }
   }
 
   // keep weaker GPUs playable: when a 4 s window of a live round averages under ~40 fps, drop render density one notch.
@@ -683,10 +906,15 @@ class Game {
     this._padMenus();
     const m = this.match;
     if (m) {
+      // online: remote squidkids to their (delayed) snapshots + their due events, before anything simulates
+      this.netMatch?.preUpdate(dt);
+      m.inputBlocked = !!this.menus?.current;   // online the menu never pauses the round; it only takes your hands off
       m.updateController(dt);
       const sub = dt > 1 / 45 ? 2 : 1; // substep physics on slow frames
       for (let i = 0; i < sub; i++) m.update(dt / sub);
       if (!m.paused) G.projectiles.update(dt);
+      this.netMatch?.flush(dt);
+      if (m.state === 'wait' && this.menus?.current === 'loading') this._waitLabel(dt);
       if (m.attract) this._updateAttract(dt);
       else if (m.state === 'playing' && m.local?.alive && this.rig.mode !== 'follow' && this.rig.mode !== 'path') this.rig.follow(m.local, true);
     }
@@ -827,6 +1055,17 @@ class Game {
     } else if (G.mode === 'match' && pp.has(9)) this.pause();
   }
 
+  // online, while every browser loads the stage: who we're waiting for
+  _waitLabel(dt) {
+    this._waitT = (this._waitT || 0) - dt;
+    if (this._waitT > 0) return;
+    this._waitT = 0.4;
+    const { loaded, total } = this.session.loadProgress();
+    this.menus?.setLoading(0.92, this.session.isHost ? `Waiting for squidkids… ${loaded}/${total}` : 'Waiting for the host…');
+  }
+
+  // Online you may be on team 1: the HUD always gets your team first / 'enemy' = the other one (it was written for
+  // team 0 = you).
   _updateHud(dt) {
     const m = this.match, a = m.local, cam = G.camera;
     this.minimap.update(dt);
@@ -844,7 +1083,7 @@ class Game {
         if (o.anim.form === 'swim') continue;
       }
       this.minimap.toCanvas(o.pos.x, o.pos.z, t);
-      players.push({ x: t.x / this.minimap.w, y: t.y / this.minimap.h, team: o.team, isSelf: o.isLocal, yaw: -o.yaw + (this.minimap.flip ? Math.PI : 0), alive: o.alive, color: G.teamHex[o.team] });
+      players.push({ x: t.x / this.minimap.w, y: t.y / this.minimap.h, team: o.team === a.team ? 0 : 1, isSelf: o.isLocal, yaw: -o.yaw + (this.minimap.flip ? Math.PI : 0), alive: o.alive, color: G.teamHex[o.team] });
     }
     // ally markers
     const markers = [];
@@ -879,12 +1118,15 @@ class Game {
       else if (a.specialReady() && (this._hints.specialT = (this._hints.specialT || 0) + dt) > 2) prompt = `Special ready! Press F`;
       else if (inkF < 0.25 && a.form !== 'squid') prompt = 'Hold SHIFT to swim in your ink and refill';
       else if (m.duration - m.time < 8 && !this._hints.shot) prompt = 'Paint the ground — most turf wins!';
+      else if (m.online && !this.input.locked && this.input.lastDevice !== 'pad') prompt = 'Click to aim with the mouse';
       if (!a.specialReady()) this._hints.specialT = 0;
       if (a.intent.fire) this._hints.shot = true;
     }
+    const teams = m.teamSummary();
+    if (a.team === 1) teams.reverse();
     const frame = {
       time: m.time,
-      teams: m.teamSummary(),
+      teams,
       ink: a.ink / PLAYER.inkMax, inkLow: a.ink < 18 || (this._lowInkFlash > 0), subCost: SUB.bomb.inkCost / PLAYER.inkMax,
       special: a.specialFrac(), specialReady: a.specialReady(), specialActive: !!a.specialActive,
       hp: a.hp / PLAYER.hp,

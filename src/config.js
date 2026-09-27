@@ -4,7 +4,8 @@ export const GAME_TITLE = 'INKWAVE';
 export const GAME_SUBTITLE = 'Turf Riot';
 export const VERSION = '1.0.0';
 
-// Team ink palettes. Team 0 ("Alpha") is always the local player's team; a palette is picked per match.
+// Team ink palettes. Offline, team 0 ("Alpha") is always the local player's team; online you can be on either team
+// (HUD / results / intro are built relative to the local player's team). A palette is picked per match.
 export const TEAM_PALETTES = [
   { id: 'tangerine-cobalt', a: '#ff8a14', b: '#2f5bff', names: ['Tangerine', 'Cobalt'] },
   { id: 'bubblegum-mint', a: '#ff3f9e', b: '#18d48c', names: ['Bubblegum', 'Mint'] },
@@ -208,6 +209,30 @@ export const BOT_NAMES = [
   'Squiddo', 'Blotch', 'Marlo', 'Inky Vee', 'Pip', 'Coral', 'Riptide', 'Nori', 'Suki', 'Zest',
   'Kelp', 'Drip', 'Tako', 'Sprinkle', 'Bubbles', 'Moxie', 'Juno', 'Wasabi', 'Fizz', 'Loop',
 ];
+
+// ---- Online play (peer-to-peer; see docs/NETWORK.md) ----
+export const NET = {
+  appId: 'inkwave-p2p',     // signaling namespace (Trystero appId) — changing it splits the player base
+  proto: 1,                 // wire protocol version; the lobby refuses peers that speak another one
+  codeLength: 10,           // room code symbols (Crockford base32 → 50 bits from the CSPRNG)
+  maxHumans: 8, teamMax: 4,
+  tickHz: 30,               // state snapshots (+ batched events) per second per peer
+  interpDelay: 0.1,         // s: remote squidkids are drawn this far in the past (covers ~3 snapshots of jitter)
+  extrapolate: 0.1,         // s: max dead reckoning past the newest snapshot before a remote actor holds still
+  joinTimeout: 20,          // s: no host heard from after joining → "room not found"
+  loadTimeout: 25,          // s: the host starts without peers still loading the stage (their squidkids go to bots)
+  // Optional TURN relays for players behind strict NATs (symmetric / carrier-grade): [{ urls, username, credential }].
+  // Empty = Trystero's default public STUN only; the host still relays game packets between peers that can't link.
+  turn: [],
+  // Nostr relays used to find each other (signaling only). Empty = Trystero's built-in public list (a few of those are
+  // usually down at any time — harmless, the rest carry it). Pin your own wss:// relays here for a private deploy.
+  relays: [],
+  // Flood limits per sending peer (token buckets: [refill per s, burst]). Well above real play (a host with 7 bots
+  // peaks around 400 splats/s and 100 hits/s), well below what would stall a frame.
+  limits: { packets: [120, 240], splats: [1200, 2400], hits: [300, 600], control: [20, 40] },
+  maxDamage: 200,           // one hit: above the biggest real hit (bomb / slam 180, charger 160, roller 140)
+  maxSplatRadius: 4.5,      // m: above the biggest real splat (slam core 5.2 × 0.72 ≈ 3.7)
+};
 
 // ---- Progression ----
 export const PROGRESSION = {
